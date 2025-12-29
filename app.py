@@ -113,9 +113,6 @@ def read_kamus_file(kamus_file):
             excel_file = pd.ExcelFile(kamus_file, engine='openpyxl')
             sheet_names = excel_file.sheet_names
             
-            # Debug: tampilkan semua sheet
-            st.sidebar.write(f"📊 Sheets ditemukan: {sheet_names}")
-            
             # Cari nama sheet yang sesuai
             sheets = {}
             
@@ -125,11 +122,9 @@ def read_kamus_file(kamus_file):
             
             if kurir_sheets:
                 sheets['kurir'] = pd.read_excel(kamus_file, sheet_name=kurir_sheets[0], engine='openpyxl')
-                st.sidebar.success(f"✅ Sheet Kurir: {kurir_sheets[0]}")
             else:
                 # Coba sheet pertama
                 sheets['kurir'] = pd.read_excel(kamus_file, sheet_name=0, engine='openpyxl')
-                st.sidebar.warning(f"⚠️ Sheet Kurir tidak ditemukan, menggunakan sheet pertama: {sheet_names[0]}")
             
             # Cari sheet Bundle Master
             bundle_keywords = ['bundle', 'bundling', 'paket']
@@ -137,15 +132,12 @@ def read_kamus_file(kamus_file):
             
             if bundle_sheets:
                 sheets['bundle'] = pd.read_excel(kamus_file, sheet_name=bundle_sheets[0], engine='openpyxl')
-                st.sidebar.success(f"✅ Sheet Bundle: {bundle_sheets[0]}")
             else:
                 # Coba sheet kedua atau pertama
                 if len(sheet_names) > 1:
                     sheets['bundle'] = pd.read_excel(kamus_file, sheet_name=1, engine='openpyxl')
-                    st.sidebar.warning(f"⚠️ Sheet Bundle tidak ditemukan, menggunakan sheet kedua: {sheet_names[1]}")
                 else:
                     sheets['bundle'] = pd.read_excel(kamus_file, sheet_name=0, engine='openpyxl')
-                    st.sidebar.warning(f"⚠️ Hanya 1 sheet, menggunakan: {sheet_names[0]}")
             
             # Cari sheet SKU Master
             sku_keywords = ['sku', 'master', 'produk', 'product', 'material']
@@ -153,21 +145,14 @@ def read_kamus_file(kamus_file):
             
             if sku_sheets:
                 sheets['sku'] = pd.read_excel(kamus_file, sheet_name=sku_sheets[0], engine='openpyxl')
-                st.sidebar.success(f"✅ Sheet SKU: {sku_sheets[0]}")
             else:
                 # Coba sheet ketiga atau lainnya
                 if len(sheet_names) > 2:
                     sheets['sku'] = pd.read_excel(kamus_file, sheet_name=2, engine='openpyxl')
-                    st.sidebar.warning(f"⚠️ Sheet SKU tidak ditemukan, menggunakan sheet ketiga: {sheet_names[2]}")
                 elif len(sheet_names) > 1:
                     sheets['sku'] = pd.read_excel(kamus_file, sheet_name=1, engine='openpyxl')
                 else:
                     sheets['sku'] = pd.read_excel(kamus_file, sheet_name=0, engine='openpyxl')
-            
-            # Tampilkan preview kolom
-            with st.sidebar.expander("🔍 Kolom di setiap sheet"):
-                for sheet_name, df in sheets.items():
-                    st.write(f"**{sheet_name}**: {', '.join(df.columns.astype(str))[:50]}...")
             
             return sheets
             
@@ -193,7 +178,6 @@ def process_data(df_orders, kamus_data):
     
     # --- PREPARE SKU MAPPING (FAST LOOKUP) ---
     sku_mapping = create_sku_mapping(df_sku)
-    st.sidebar.info(f"📚 SKU Mapping: {len(sku_mapping)} entries")
     
     # --- CLEANING DATA MASTER ---
     df_bundle = clean_df_strings(df_bundle)
@@ -211,9 +195,6 @@ def process_data(df_orders, kamus_data):
     
     # --- CLEAN ORDERS DATA ---
     df_orders.columns = df_orders.columns.astype(str).str.strip()
-    
-    # Debug: tampilkan kolom orders
-    st.sidebar.write(f"📦 Kolom Order: {len(df_orders.columns)} kolom")
     
     # Pastikan kolom yang diperlukan ada
     required_cols = ['Status Pesanan', 'Pesanan yang Dikelola Shopee', 'Opsi Pengiriman', 'No. Resi', 'Jumlah']
@@ -315,19 +296,13 @@ def process_data(df_orders, kamus_data):
                 qty = row.get('Component Quantity', 1) if 'Component Quantity' in row else 1
                 bundle_mapping[bundle_sku].append((component_sku, qty))
     
-    # Process expansion dengan progress bar
-    progress_bar = st.sidebar.progress(0)
+    # Process expansion
     expanded_rows = []
-    total_rows = len(df_filtered)
     
-    for idx, (_, row) in enumerate(df_filtered.iterrows()):
+    for _, row in df_filtered.iterrows():
         sku_awal_cleaned = row['SKU Awal']
         original_sku_raw = row.get('Nomor Referensi SKU', row.get('SKU Awal', ''))
         quantity = row.get('Jumlah', 1)
-        
-        # Update progress
-        if idx % 10 == 0:
-            progress_bar.progress(min(idx / total_rows, 0.9))
         
         if sku_awal_cleaned and sku_awal_cleaned in bundle_mapping:
             # Bundle ditemukan
@@ -352,10 +327,6 @@ def process_data(df_orders, kamus_data):
                 'SKU Component': sku_awal_cleaned,
                 'Jumlah Final': quantity * 1,
             })
-    
-    progress_bar.progress(1.0)
-    time.sleep(0.5)  # Biar progress bar kelihatan
-    progress_bar.empty()
     
     df_bundle_expanded = pd.DataFrame(expanded_rows)
     
@@ -398,50 +369,15 @@ def process_data(df_orders, kamus_data):
         {'No. Pesanan': 'nunique'}
     ).reset_index().rename(columns={'No. Pesanan': 'Total Order'})
     
-    # Debug info
+    # End timer
     end_time = time.time()
     processing_time = end_time - start_time
     
-    # Tampilkan debug info di sidebar
-    with st.sidebar.expander("⚡ Performance Info"):
-        st.write(f"⏱️ Processing time: {processing_time:.2f} seconds")
-        st.write(f"📊 Original orders: {len(df_orders)}")
-        st.write(f"🎯 Filtered orders: {len(df_filtered)}")
-        st.write(f"📦 Expanded items: {len(df_bundle_expanded)}")
-        st.write(f"📚 SKU Mapping entries: {len(sku_mapping)}")
-        
-        # Hitung match rate
-        if not df_bundle_expanded.empty:
-            matched = df_bundle_expanded['Product Name'].notna().sum()
-            total = len(df_bundle_expanded)
-            match_rate = (matched / total) * 100
-            st.write(f"✅ Product Name match: {matched}/{total} ({match_rate:.1f}%)")
-    
-    # Debug untuk SKU yang tidak ketemu
-    missing_skus = df_output1[df_output1['Product Name'] == ""]['Nomor Referensi SKU (Component/Cleaned)'].unique()
-    if len(missing_skus) > 0:
-        with st.sidebar.expander("🔍 Debug Missing SKUs"):
-            st.write(f"Missing SKUs: {len(missing_skus)}")
-            
-            # Sample debugging
-            sample_missing = missing_skus[0] if len(missing_skus) > 0 else ""
-            if sample_missing:
-                st.write(f"Sample missing SKU: '{sample_missing}'")
-                
-                # Cari di SKU Master
-                found = False
-                for key in sku_mapping:
-                    if sample_missing in key or key in sample_missing:
-                        st.write(f"Matching key in mapping: '{key}' -> '{sku_mapping[key]}'")
-                        found = True
-                
-                if not found:
-                    st.write("Not found in SKU mapping")
-                    
-                    # Tampilkan SKU Master sample
-                    st.write("Sample from SKU Master:")
-                    st.write(df_sku.head(5)[['Material', 'Material description']] 
-                           if 'Material' in df_sku.columns else df_sku.head(5))
+    # Hitung missing SKUs
+    missing_skus = []
+    if not df_bundle_expanded.empty:
+        missing_mask = df_bundle_expanded['Product Name'].isna() | (df_bundle_expanded['Product Name'] == '')
+        missing_skus = df_bundle_expanded.loc[missing_mask, 'SKU Component'].unique().tolist()
     
     return {
         'output1': df_output1,
@@ -456,8 +392,7 @@ def process_data(df_orders, kamus_data):
         'missing_skus': missing_skus
     }
 
-# --- MAIN UI ---
-# SIDEBAR
+# --- SIDEBAR UPLOAD ---
 with st.sidebar:
     st.header("📁 Upload Files")
     
@@ -490,15 +425,15 @@ with st.sidebar:
     
     # Process button dengan status
     if order_file and kamus_file:
-        if st.button("🚀 PROCESS DATA", type="primary", use_container_width=True):
+        if st.button("🚀 PROCESS DATA", type="primary", width='stretch'):
             st.session_state.order_file = order_file
             st.session_state.kamus_file = kamus_file
             st.rerun()
     else:
-        st.button("🚀 PROCESS DATA", type="primary", use_container_width=True, disabled=True)
+        st.button("🚀 PROCESS DATA", type="primary", width='stretch', disabled=True)
     
     st.divider()
-    st.caption("⚡ Optimized v4.0 | Fast Processing")
+    st.caption("⚡ Optimized v4.1 | Fast Processing")
 
 # MAIN CONTENT - Processing
 if hasattr(st.session_state, 'order_file') and hasattr(st.session_state, 'kamus_file'):
@@ -524,8 +459,10 @@ if hasattr(st.session_state, 'order_file') and hasattr(st.session_state, 'kamus_
                     st.session_state.processed = True
                     
                     # Clear file references
-                    del st.session_state.order_file
-                    del st.session_state.kamus_file
+                    if hasattr(st.session_state, 'order_file'):
+                        del st.session_state.order_file
+                    if hasattr(st.session_state, 'kamus_file'):
+                        del st.session_state.kamus_file
                     
                     st.rerun()
                 elif results and "error" in results:
@@ -536,30 +473,37 @@ if hasattr(st.session_state, 'order_file') and hasattr(st.session_state, 'kamus_
         except Exception as e:
             st.error(f"❌ Error: {str(e)}")
             import traceback
-            st.code(traceback.format_exc())
+            with st.expander("Error Details"):
+                st.code(traceback.format_exc())
 
 # Display results jika sudah processed
-if st.session_state.processed:
+if st.session_state.processed and 'results' in st.session_state:
     results = st.session_state.results
     
-    # Header dengan metrics
-    st.success(f"✅ Processing completed in {results['processing_time']:.1f}s")
+    # Header dengan metrics - FIX: cek key existence
+    if 'processing_time' in results:
+        st.success(f"✅ Processing completed in {results['processing_time']:.1f}s")
+    else:
+        st.success("✅ Processing completed")
     
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Original Orders", results['original_count'])
+        st.metric("Original Orders", results.get('original_count', 0))
     with col2:
-        st.metric("Filtered Orders", results['filtered_count'])
+        st.metric("Filtered Orders", results.get('filtered_count', 0))
     with col3:
-        st.metric("Expanded Items", results['expanded_count'])
+        st.metric("Expanded Items", results.get('expanded_count', 0))
     with col4:
-        matched = results['output1']['Product Name'].notna().sum()
-        total = len(results['output1'])
-        match_rate = (matched / total) * 100
-        st.metric("Product Name Match", f"{match_rate:.1f}%")
+        if not results['output1'].empty:
+            matched = results['output1']['Product Name'].notna().sum()
+            total = len(results['output1'])
+            match_rate = (matched / total) * 100 if total > 0 else 0
+            st.metric("Product Name Match", f"{match_rate:.1f}%")
+        else:
+            st.metric("Product Name Match", "0%")
     
     # Warning jika ada SKU yang tidak ketemu
-    if len(results['missing_skus']) > 0:
+    if 'missing_skus' in results and len(results['missing_skus']) > 0:
         st.warning(f"⚠️ {len(results['missing_skus'])} SKU tidak memiliki Product Name")
         
         with st.expander("🔍 Debug SKU Mismatch", expanded=False):
@@ -567,50 +511,51 @@ if st.session_state.processed:
             st.write(results['missing_skus'][:50])  # Limit 50
             
             st.write("**Contoh SKU Master:**")
-            st.dataframe(results['sku_master'].head(10), use_container_width=True)
+            st.dataframe(results['sku_master'].head(10), width='stretch')
             
             # Advanced debugging
             if st.button("Run Deep Debug"):
                 st.write("**Deep Debug Analysis:**")
                 
                 # Bandingkan format
-                sample_missing = results['missing_skus'][0]
-                st.write(f"Sample missing: '{sample_missing}'")
-                st.write(f"Length: {len(sample_missing)} chars")
-                st.write(f"ASCII codes: {[ord(c) for c in sample_missing[:10]]}")
-                
-                # Cari di SKU Master dengan berbagai cara
-                st.write("**Search in SKU Master:**")
-                
-                df_sku = results['sku_master']
-                found_anywhere = False
-                
-                for col in df_sku.columns:
-                    # Coba exact match
-                    exact_matches = df_sku[df_sku[col].astype(str).str.strip() == sample_missing]
-                    if not exact_matches.empty:
-                        st.write(f"✅ Exact match in column '{col}':")
-                        st.write(exact_matches.head())
-                        found_anywhere = True
+                if results['missing_skus']:
+                    sample_missing = results['missing_skus'][0]
+                    st.write(f"Sample missing: '{sample_missing}'")
+                    st.write(f"Length: {len(sample_missing)} chars")
+                    st.write(f"ASCII codes: {[ord(c) for c in sample_missing[:10]]}")
                     
-                    # Coba partial match
-                    partial_matches = df_sku[df_sku[col].astype(str).str.contains(sample_missing, na=False)]
-                    if not partial_matches.empty:
-                        st.write(f"🔍 Partial match in column '{col}':")
-                        st.write(partial_matches.head())
-                        found_anywhere = True
-                
-                if not found_anywhere:
-                    st.write("❌ Not found in any column")
+                    # Cari di SKU Master dengan berbagai cara
+                    st.write("**Search in SKU Master:**")
                     
-                    # Tampilkan SKU yang mirip
-                    st.write("**Similar SKUs in master:**")
+                    df_sku = results['sku_master']
+                    found_anywhere = False
+                    
                     for col in df_sku.columns:
-                        if df_sku[col].dtype == 'object':
-                            similar = df_sku[df_sku[col].astype(str).str.contains(sample_missing[:5], na=False)]
-                            if not similar.empty:
-                                st.write(f"In column '{col}':")
-                                st.write(similar.head())
+                        # Coba exact match
+                        exact_matches = df_sku[df_sku[col].astype(str).str.strip() == sample_missing]
+                        if not exact_matches.empty:
+                            st.write(f"✅ Exact match in column '{col}':")
+                            st.write(exact_matches.head())
+                            found_anywhere = True
+                        
+                        # Coba partial match
+                        partial_matches = df_sku[df_sku[col].astype(str).str.contains(sample_missing, na=False)]
+                        if not partial_matches.empty:
+                            st.write(f"🔍 Partial match in column '{col}':")
+                            st.write(partial_matches.head())
+                            found_anywhere = True
+                    
+                    if not found_anywhere:
+                        st.write("❌ Not found in any column")
+                        
+                        # Tampilkan SKU yang mirip
+                        st.write("**Similar SKUs in master:**")
+                        for col in df_sku.columns:
+                            if df_sku[col].dtype == 'object':
+                                similar = df_sku[df_sku[col].astype(str).str.contains(sample_missing[:5], na=False)]
+                                if not similar.empty:
+                                    st.write(f"In column '{col}':")
+                                    st.write(similar.head())
     
     # Tabs untuk output
     tab1, tab2, tab3, tab4 = st.tabs([
@@ -621,55 +566,184 @@ if st.session_state.processed:
     ])
     
     with tab1:
-        # ... (sama seperti sebelumnya, tapi tambahkan filter)
         st.subheader("Detail Order")
         
-        # Filter options
-        col_filter1, col_filter2 = st.columns(2)
-        with col_filter1:
-            show_bundles = st.selectbox(
-                "Show",
-                ["All", "Bundles Only", "Singles Only"],
-                key="filter_bundle"
+        if results['output1'].empty:
+            st.info("Tidak ada data detail order")
+        else:
+            # Filter options
+            col_filter1, col_filter2 = st.columns(2)
+            with col_filter1:
+                show_bundles = st.selectbox(
+                    "Show",
+                    ["All", "Bundles Only", "Singles Only"],
+                    key="filter_bundle"
+                )
+            
+            with col_filter2:
+                show_product_name = st.selectbox(
+                    "Product Name",
+                    ["All", "With Name", "Without Name"],
+                    key="filter_name"
+                )
+            
+            # Apply filters
+            df_display = results['output1'].copy()
+            
+            if show_bundles == "Bundles Only":
+                df_display = df_display[df_display['Is Bundle?'] == 'Yes']
+            elif show_bundles == "Singles Only":
+                df_display = df_display[df_display['Is Bundle?'] == 'No']
+            
+            if show_product_name == "With Name":
+                df_display = df_display[df_display['Product Name'].notna() & (df_display['Product Name'] != '')]
+            elif show_product_name == "Without Name":
+                df_display = df_display[df_display['Product Name'].isna() | (df_display['Product Name'] == '')]
+            
+            st.dataframe(
+                df_display,
+                width='stretch',
+                height=400
             )
-        
-        with col_filter2:
-            show_product_name = st.selectbox(
-                "Product Name",
-                ["All", "With Name", "Without Name"],
-                key="filter_name"
-            )
-        
-        # Apply filters
-        df_display = results['output1'].copy()
-        
-        if show_bundles == "Bundles Only":
-            df_display = df_display[df_display['Is Bundle?'] == 'Yes']
-        elif show_bundles == "Singles Only":
-            df_display = df_display[df_display['Is Bundle?'] == 'No']
-        
-        if show_product_name == "With Name":
-            df_display = df_display[df_display['Product Name'].notna() & (df_display['Product Name'] != '')]
-        elif show_product_name == "Without Name":
-            df_display = df_display[df_display['Product Name'].isna() | (df_display['Product Name'] == '')]
-        
-        st.dataframe(
-            df_display,
-            use_container_width=True,
-            height=400
-        )
     
     with tab2:
-        # ... (sama seperti sebelumnya)
-        pass
+        st.subheader("SKU Summary")
+        
+        if results['output2'].empty:
+            st.info("Tidak ada data SKU summary")
+        else:
+            # Tampilkan SKU dengan dan tanpa product name
+            with_names = results['output2'][results['output2']['Product Name'].notna() & (results['output2']['Product Name'] != '')]
+            without_names = results['output2'][results['output2']['Product Name'].isna() | (results['output2']['Product Name'] == '')]
+            
+            col_x, col_y = st.columns(2)
+            with col_x:
+                st.metric("SKU dengan Product Name", len(with_names))
+            with col_y:
+                st.metric("SKU tanpa Product Name", len(without_names))
+            
+            # Tabs untuk dengan dan tanpa product name
+            tab_a, tab_b = st.tabs(["✅ Dengan Product Name", "⚠️ Tanpa Product Name"])
+            
+            with tab_a:
+                if not with_names.empty:
+                    st.dataframe(
+                        with_names,
+                        width='stretch',
+                        hide_index=True
+                    )
+                else:
+                    st.info("Tidak ada SKU dengan Product Name")
+            
+            with tab_b:
+                if not without_names.empty:
+                    st.dataframe(
+                        without_names[['Nomor Referensi SKU (Cleaned)', 'Jumlah (Grand total by SKU)']],
+                        width='stretch',
+                        hide_index=True
+                    )
+                    st.info("SKU ini tidak ditemukan di SKU Master. Periksa file kamus.")
+                else:
+                    st.success("🎉 Semua SKU memiliki Product Name!")
     
     with tab3:
-        # ... (sama seperti sebelumnya)
-        pass
+        st.subheader("Statistics")
+        
+        if results['output3'].empty:
+            st.info("Tidak ada data statistics")
+        else:
+            col_i, col_ii = st.columns([2, 1])
+            
+            with col_i:
+                st.dataframe(
+                    results['output3'],
+                    width='stretch',
+                    hide_index=True
+                )
+            
+            with col_ii:
+                total = results['output3']['Total Order'].sum()
+                st.metric("Total Orders", total)
     
     with tab4:
-        # ... (sama seperti sebelumnya)
-        pass
+        st.subheader("📥 Download Results")
+        
+        if results['output1'].empty:
+            st.info("Tidak ada data untuk didownload")
+        else:
+            # Generate timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Format selection
+            col_format1, col_format2 = st.columns(2)
+            with col_format1:
+                include_product_names = st.checkbox("Include Product Names", value=True)
+            with col_format2:
+                download_format = st.radio("Format", ["CSV", "Excel"], horizontal=True)
+            
+            st.divider()
+            
+            # Prepare data berdasarkan pilihan
+            if include_product_names:
+                download_df1 = results['output1']
+                download_df2 = results['output2']
+            else:
+                # Hilangkan kolom Product Name
+                download_df1 = results['output1'].drop(columns=['Product Name'], errors='ignore')
+                download_df2 = results['output2'].drop(columns=['Product Name'], errors='ignore')
+            
+            if download_format == "CSV":
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    # Download Output 1
+                    csv1 = download_df1.to_csv(index=False, encoding='utf-8-sig')
+                    st.download_button(
+                        label="📥 Detail Order",
+                        data=csv1,
+                        file_name=f"detail_order_{timestamp}.csv",
+                        mime="text/csv",
+                        width='stretch'
+                    )
+                
+                with col2:
+                    # Download Output 2
+                    csv2 = download_df2.to_csv(index=False, encoding='utf-8-sig')
+                    st.download_button(
+                        label="📥 SKU Summary",
+                        data=csv2,
+                        file_name=f"sku_summary_{timestamp}.csv",
+                        mime="text/csv",
+                        width='stretch'
+                    )
+                
+                with col3:
+                    # Download Output 3
+                    csv3 = results['output3'].to_csv(index=False, encoding='utf-8-sig')
+                    st.download_button(
+                        label="📥 Courier Summary",
+                        data=csv3,
+                        file_name=f"courier_summary_{timestamp}.csv",
+                        mime="text/csv",
+                        width='stretch'
+                    )
+            else:  # Excel format
+                # Download All as Excel
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    download_df1.to_excel(writer, sheet_name='Detail Order', index=False)
+                    download_df2.to_excel(writer, sheet_name='SKU Summary', index=False)
+                    results['output3'].to_excel(writer, sheet_name='Courier Summary', index=False)
+                    # Tambahkan sheet SKU Master sebagai reference
+                    results['sku_master'].to_excel(writer, sheet_name='SKU Master Ref', index=False)
+                
+                st.download_button(
+                    label="📊 Download All (Excel)",
+                    data=output.getvalue(),
+                    file_name=f"instant_sameday_report_{timestamp}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    width='stretch'
+                )
 
 else:
     # Landing page
