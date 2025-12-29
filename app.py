@@ -95,7 +95,7 @@ def standardize_tokped_data(df):
         'Tracking ID': 'tracking_id',
         'Kurir': 'shipping_option',
         'Pengiriman': 'shipping_option',
-        'Delivery Option': 'shipping_option' # <-- PENAMBAHAN PENTING
+        'Delivery Option': 'shipping_option'
     }
     df = df.rename(columns=col_map)
     df['marketplace'] = 'Tokopedia'
@@ -147,9 +147,26 @@ def process_data(uploaded_files, kamus_data):
     
     if 'SKU Bundle' in df_bundle.columns:
         df_bundle['SKU Bundle'] = df_bundle['SKU Bundle'].apply(clean_sku)
+    
+    # --- REVISI LOGIC LOOKUP SKU MASTER ---
+    # Target: Kolom B (Kode) dan Kolom C (Nama)
+    # Dalam Pandas (0-indexed): Kolom A=0, B=1, C=2
+    try:
+        if len(df_sku.columns) >= 3:
+            # Ambil Kolom Index 1 (B) dan Index 2 (C)
+            df_sku_subset = df_sku.iloc[:, [1, 2]].copy()
+            df_sku_subset.columns = ['SKU Component', 'Product Name Master']
+        else:
+            # Fallback jika kolom kurang (misal cuma ada A dan B)
+            st.warning("⚠️ Format SKU Master tidak standar (Kurang dari 3 kolom). Mencoba ambil kolom 1 & 2.")
+            df_sku_subset = df_sku.iloc[:, [0, 1]].copy()
+            df_sku_subset.columns = ['SKU Component', 'Product Name Master']
+            
+        df_sku_subset['SKU Component'] = df_sku_subset['SKU Component'].apply(clean_sku)
         
-    df_sku = df_sku.rename(columns={df_sku.columns[0]: 'SKU Component', df_sku.columns[1]: 'Product Name Master'})
-    df_sku['SKU Component'] = df_sku['SKU Component'].apply(clean_sku)
+    except Exception as e:
+        return {'error': f"❌ Gagal memproses Sheet SKU Master. Pastikan ada Kolom B (Kode) dan C (Nama). Error: {e}"}
+
     
     # Get Instant Couriers List
     instant_options = []
@@ -169,8 +186,7 @@ def process_data(uploaded_files, kamus_data):
             else:
                 df_raw = pd.read_excel(file_obj, dtype=str)
             
-            # --- MEMBERSIHKAN BARIS HEADER SAMPAH ---
-            # Jika baris pertama adalah deskripsi (ciri khas file export baru), buang baris itu
+            # Buang header sampah (ciri khas export Tokped/TikTok terbaru)
             if len(df_raw) > 0 and str(df_raw.iloc[0, 0]).startswith('Platform unique'):
                 df_raw = df_raw.iloc[1:].reset_index(drop=True)
 
@@ -181,7 +197,7 @@ def process_data(uploaded_files, kamus_data):
         # Standardize based on Marketplace
         if mp_type == 'Shopee':
             df_std = standardize_shopee_data(df_raw)
-            # Filter Shopee: Perlu Dikirim + Not Managed + Instant + No Resi
+            # Filter Shopee
             df_filtered = df_std[
                 (df_std['status'].str.upper() == 'PERLU DIKIRIM') &
                 (df_std['managed_by_platform'].str.upper().isin(['NO', 'TIDAK'])) &
@@ -191,7 +207,7 @@ def process_data(uploaded_files, kamus_data):
             
         elif mp_type == 'Tokopedia':
             df_std = standardize_tokped_data(df_raw)
-            # Filter Tokped: Cukup cek Resi Kosong (Asumsi status sudah benar dari file export)
+            # Filter Tokped (Resi Kosong)
             df_filtered = df_std[
                 ((df_std['tracking_id'].isna()) | (df_std['tracking_id'] == '') | (df_std['tracking_id'] == 'nan'))
             ].copy()
@@ -220,9 +236,11 @@ def process_data(uploaded_files, kamus_data):
                 # EXPAND BUNDLE
                 components = df_bundle[df_bundle['SKU Bundle'] == sku_key]
                 for _, comp in components.iterrows():
+                    # Handle nama kolom qty yang variatif
                     comp_qty_col = [c for c in df_bundle.columns if 'quantity' in c.lower() or 'jumlah' in c.lower()]
                     comp_qty = float(comp[comp_qty_col[0]]) if comp_qty_col else 1
                     
+                    # Handle nama kolom component
                     comp_sku_col = [c for c in df_bundle.columns if 'component' in c.lower() or 'komponen' in c.lower()]
                     comp_sku = clean_sku(comp[comp_sku_col[0]]) if comp_sku_col else ""
 
@@ -256,28 +274,31 @@ def process_data(uploaded_files, kamus_data):
 
     df_result = pd.DataFrame(all_expanded_rows)
     
-    # --- 4. LOOKUP PRODUCT NAMES ---
-    # Merge Component Name
+    # --- 4. LOOKUP PRODUCT NAMES (FIXED LOGIC) ---
+    
+    # Merge Component Name (Lookup ke SKU Master B & C)
     df_result = pd.merge(
         df_result, 
-        df_sku[['SKU Component', 'Product Name Master']], 
+        df_sku_subset, # Pakai subset B&C yg sudah dibuat diatas
         on='SKU Component', 
         how='left'
     )
     df_result = df_result.rename(columns={'Product Name Master': 'Component Name'})
     df_result['Component Name'] = df_result['Component Name'].fillna(df_result['SKU Component'])
     
-    # Merge Original Product Name
+    # Merge Original Product Name (Optional, buat info aja)
     df_result = pd.merge(
         df_result,
-        df_sku[['SKU Component', 'Product Name Master']],
+        df_sku_subset,
         left_on='SKU Original (Cleaned)',
         right_on='SKU Component',
         how='left',
         suffixes=('', '_orig')
     )
     df_result = df_result.rename(columns={'Product Name Master': 'Product Name Original'})
-    df_result.drop(columns=['SKU Component_orig'], inplace=True)
+    # Bersihkan kolom hasil merge sisa
+    if 'SKU Component_orig' in df_result.columns:
+        df_result.drop(columns=['SKU Component_orig'], inplace=True)
 
     # --- 5. CREATE OUTPUTS ---
     cols_order = [
@@ -316,7 +337,7 @@ if st.sidebar.checkbox("Shopee", value=True):
     f = st.sidebar.file_uploader("Order Shopee", type=['csv', 'xlsx'], key='shp')
     if f: mp_files.append(('Shopee', f))
 
-if st.sidebar.checkbox("Tokopedia", value=True): # Default True agar gampang
+if st.sidebar.checkbox("Tokopedia", value=True):
     f = st.sidebar.file_uploader("Order Tokopedia", type=['csv', 'xlsx'], key='tok')
     if f: mp_files.append(('Tokopedia', f))
 
@@ -352,7 +373,7 @@ if st.sidebar.button("🚀 PROSES DATA", type="primary", use_container_width=Tru
                     
             except Exception as e:
                 st.error(f"Terjadi kesalahan: {e}")
-                # st.exception(e) # Uncomment untuk debug detail
+                # st.exception(e) 
 
 # ==========================================
 # 4. DISPLAY RESULTS
