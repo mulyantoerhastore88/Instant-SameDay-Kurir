@@ -38,6 +38,30 @@ def clean_df_strings(df):
         df[col] = df[col].astype(str).str.strip()
     return df
 
+# --- FUNGSI LOOKUP PRODUCT NAME ---
+def lookup_product_name(df_sku, sku_code):
+    """Lookup product name dari SKU Master berdasarkan SKU Code"""
+    try:
+        # Cari di kolom SKU Code atau Material
+        if 'SKU Code' in df_sku.columns:
+            match = df_sku[df_sku['SKU Code'].astype(str).str.strip() == str(sku_code).strip()]
+        elif 'Material' in df_sku.columns:
+            match = df_sku[df_sku['Material'].astype(str).str.strip() == str(sku_code).strip()]
+        else:
+            return ""
+        
+        if not match.empty and 'Material description' in match.columns:
+            return match.iloc[0]['Material description']
+        elif not match.empty and 'Material description' not in match.columns:
+            # Coba kolom lain yang mungkin berisi nama produk
+            for col in ['Description', 'Product Name', 'Nama Produk']:
+                if col in match.columns:
+                    return match.iloc[0][col]
+        
+        return ""
+    except:
+        return ""
+
 # --- FUNGSI MEMBACA FILE KAMUS ---
 def read_kamus_file(kamus_file):
     """Membaca file kamus Excel yang memiliki 3 sheet"""
@@ -83,7 +107,7 @@ def read_kamus_file(kamus_file):
                     return None
             
             # Tampilkan info sheet yang terbaca
-            st.sidebar.info(f"✅ Sheet terbaca: {', '.join(sheets.keys())}")
+            st.sidebar.success(f"✅ Sheet terbaca: {', '.join(sheets.keys())}")
             return sheets
             
         else:
@@ -111,26 +135,29 @@ def process_data(df_orders, kamus_data):
     if 'SKU Bundle' in df_bundle.columns:
         df_bundle['SKU Bundle'] = df_bundle['SKU Bundle'].apply(clean_sku)
     
+    # Standardize SKU Master column names
+    sku_col_mapping = {}
     if 'Material' in df_sku.columns:
-        df_sku.rename(columns={'Material': 'SKU Component'}, inplace=True)
-    elif 'SKU Code' in df_sku.columns:
-        df_sku.rename(columns={'SKU Code': 'SKU Component'}, inplace=True)
+        sku_col_mapping['Material'] = 'SKU Code'
+    if 'SKU Code' in df_sku.columns:
+        sku_col_mapping['SKU Code'] = 'SKU Code'
+    if 'Material description' in df_sku.columns:
+        sku_col_mapping['Material description'] = 'Product Name'
     
-    if 'SKU Component' in df_sku.columns:
-        df_sku['SKU Component'] = df_sku['SKU Component'].apply(clean_sku)
-    else:
-        st.error("Kolom SKU Component tidak ditemukan di SKU Master")
-        return None
+    df_sku.rename(columns=sku_col_mapping, inplace=True)
     
     # Clean orders data
     df_orders.columns = df_orders.columns.astype(str).str.strip()
     
     # Pastikan kolom yang diperlukan ada
-    required_cols = ['Status Pesanan', 'Pesanan yang Dikelola Shopee', 'Opsi Pengiriman', 'No. Resi']
+    required_cols = ['Status Pesanan', 'Pesanan yang Dikelola Shopee', 'Opsi Pengiriman', 'No. Resi', 'Jumlah']
     for col in required_cols:
         if col not in df_orders.columns:
             st.warning(f"⚠️ Kolom '{col}' tidak ditemukan di file order")
-            df_orders[col] = ""
+            if col == 'Jumlah':
+                df_orders[col] = 1  # Default quantity
+            else:
+                df_orders[col] = ""
     
     df_orders['Status Pesanan'] = df_orders['Status Pesanan'].astype(str).str.strip()
     df_orders['Pesanan yang Dikelola Shopee'] = df_orders['Pesanan yang Dikelola Shopee'].astype(str).str.strip()
@@ -158,7 +185,7 @@ def process_data(df_orders, kamus_data):
     
     if 'Instant/Same Day' in df_kurir.columns:
         instant_same_day_options = df_kurir[
-            df_kurir['Instant/Same Day'].astype(str).str.strip().str.upper().isin(['YES', 'YA', '1', 'TRUE'])
+            df_kurir['Instant/Same Day'].astype(str).str.strip().str.upper().isin(['YES', 'YA', '1', 'TRUE', 'Y'])
         ]['Opsi Pengiriman'].unique()
     else:
         st.error("Kolom 'Instant/Same Day' tidak ditemukan di file Kamus")
@@ -167,7 +194,7 @@ def process_data(df_orders, kamus_data):
     # Filter utama
     df_filtered = df_orders[
         (df_orders['Status Pesanan'].str.upper() == 'PERLU DIKIRIM') &
-        (df_orders['Pesanan yang Dikelola Shopee'].str.upper().isin(['NO', 'TIDAK'])) &
+        (df_orders['Pesanan yang Dikelola Shopee'].str.upper().isin(['NO', 'TIDAK', 'FALSE'])) &
         (df_orders['Opsi Pengiriman'].isin(instant_same_day_options)) &
         (df_orders['Is Resi Blank'] == True)
     ].copy()
@@ -211,13 +238,15 @@ def process_data(df_orders, kamus_data):
             # Bundle ditemukan
             bundle_components = df_bundle[df_bundle['SKU Bundle'] == sku_awal_cleaned]
             for _, comp_row in bundle_components.iterrows():
+                component_sku = clean_sku(comp_row.get('SKU Component', comp_row.get('Component', '')))
                 expanded_rows.append({
                     'No. Pesanan': row.get('No. Pesanan', ''),
                     'Status Pesanan': row.get('Status Pesanan', ''),
                     'Opsi Pengiriman': row.get('Opsi Pengiriman', ''),
                     'Nomor Referensi SKU Original': original_sku_raw,
                     'Is Bundle?': 'Yes',
-                    'SKU Component': clean_sku(comp_row.get('SKU Component', comp_row.get('Component', ''))),
+                    'SKU Component': component_sku,
+                    'Product Name': lookup_product_name(df_sku, component_sku),
                     'Jumlah Final': row.get('Jumlah', 1) * comp_row.get('Component Quantity', 1),
                 })
         else:
@@ -229,33 +258,59 @@ def process_data(df_orders, kamus_data):
                 'Nomor Referensi SKU Original': original_sku_raw,
                 'Is Bundle?': 'No',
                 'SKU Component': sku_awal_cleaned,
+                'Product Name': lookup_product_name(df_sku, sku_awal_cleaned),
                 'Jumlah Final': row.get('Jumlah', 1) * 1,
             })
     
     df_bundle_expanded = pd.DataFrame(expanded_rows)
     
-    # Output 1: Detail Order
-    df_output1 = df_bundle_expanded.rename(columns={
+    # Output 1: Detail Order (dengan Product Name)
+    df_output1 = df_bundle_expanded.copy()
+    df_output1 = df_output1[[
+        'No. Pesanan',
+        'Status Pesanan',
+        'Opsi Pengiriman',
+        'Nomor Referensi SKU Original',
+        'Is Bundle?',
+        'SKU Component',
+        'Product Name',
+        'Jumlah Final'
+    ]]
+    
+    df_output1 = df_output1.rename(columns={
         'SKU Component': 'Nomor Referensi SKU (Component/Cleaned)',
         'Jumlah Final': 'Jumlah dikalikan Component Quantity (Grand Total)'
     })
     
-    # Output 2: Grand Total per SKU
+    # Output 2: Grand Total per SKU (dengan Product Name)
     if not df_bundle_expanded.empty:
-        df_output2 = df_bundle_expanded.groupby('SKU Component').agg(
+        # Group by SKU Component dan Product Name
+        df_output2 = df_bundle_expanded.groupby(['SKU Component', 'Product Name']).agg(
             {'Jumlah Final': 'sum'}
-        ).reset_index().rename(columns={
+        ).reset_index()
+        
+        # Reorder columns untuk konsistensi
+        df_output2 = df_output2.rename(columns={
             'SKU Component': 'Nomor Referensi SKU (Cleaned)',
             'Jumlah Final': 'Jumlah (Grand total by SKU)'
         })
+        
+        # Urutkan dari yang terbesar
+        df_output2 = df_output2.sort_values('Jumlah (Grand total by SKU)', ascending=False)
     else:
-        df_output2 = pd.DataFrame(columns=['Nomor Referensi SKU (Cleaned)', 'Jumlah (Grand total by SKU)'])
+        df_output2 = pd.DataFrame(columns=['Nomor Referensi SKU (Cleaned)', 'Product Name', 'Jumlah (Grand total by SKU)'])
     
     # Tampilkan preview kamus yang terbaca
     with st.sidebar.expander("🔍 Preview Kamus"):
         st.write("**Kurir:**", df_kurir.shape, "rows")
         st.write("**Bundle:**", df_bundle.shape, "rows")
         st.write("**SKU:**", df_sku.shape, "rows")
+        
+        # Tampilkan contoh lookup
+        if 'SKU Code' in df_sku.columns and not df_sku.empty:
+            sample_sku = df_sku.iloc[0]['SKU Code'] if 'SKU Code' in df_sku.columns else ""
+            sample_name = df_sku.iloc[0]['Product Name'] if 'Product Name' in df_sku.columns else ""
+            st.write(f"Sample lookup: {sample_sku} → {sample_name}")
     
     return {
         'output1': df_output1,
@@ -263,7 +318,8 @@ def process_data(df_orders, kamus_data):
         'output3': df_output3,
         'filtered_count': len(df_filtered),
         'expanded_count': len(df_bundle_expanded),
-        'original_count': len(df_orders)
+        'original_count': len(df_orders),
+        'sku_master': df_sku  # Simpan untuk reference
     }
 
 # --- SIDEBAR UPLOAD ---
@@ -287,10 +343,15 @@ with st.sidebar:
     
     st.divider()
     
+    # Advanced options
+    with st.expander("⚙️ Advanced Options"):
+        auto_process = st.checkbox("Auto-process after upload", value=True)
+        show_debug = st.checkbox("Show debug info", value=False)
+    
     # Process button
     process_btn = st.button("🚀 Process Data", type="primary", use_container_width=True)
     
-    if process_btn:
+    if process_btn or (auto_process and order_file and kamus_file):
         if order_file and kamus_file:
             with st.spinner("Memproses data..."):
                 try:
@@ -311,6 +372,13 @@ with st.sidebar:
                             st.session_state.results = results
                             st.session_state.processed = True
                             st.success("✅ Data berhasil diproses!")
+                            
+                            # Debug info
+                            if show_debug:
+                                st.write("**Debug Info:**")
+                                st.write(f"- Orders: {results['original_count']} original, {results['filtered_count']} filtered")
+                                st.write(f"- SKU Master entries: {len(results['sku_master'])}")
+                                
                         elif results and "error" in results:
                             st.error(results["error"])
                         else:
@@ -323,7 +391,7 @@ with st.sidebar:
             st.warning("⚠️ Silakan upload kedua file terlebih dahulu!")
     
     st.divider()
-    st.caption("Version 2.0 | Upload 2 File Saja")
+    st.caption("Version 3.0 | Dengan Product Name Lookup")
 
 # --- MAIN CONTENT ---
 if st.session_state.processed:
@@ -338,8 +406,8 @@ if st.session_state.processed:
     with col3:
         st.metric("Items Expanded", results['expanded_count'])
     with col4:
-        total_orders = results['output3']['Total Order'].sum()
-        st.metric("Unique SKUs", len(results['output2']))
+        st.metric("SKU dengan Product Name", 
+                 results['output2']['Product Name'].notna().sum())
     
     # Tabs
     tab1, tab2, tab3, tab4 = st.tabs([
@@ -350,134 +418,232 @@ if st.session_state.processed:
     ])
     
     with tab1:
-        st.subheader("Detail Order (Expanded)")
+        st.subheader("Detail Order (Expanded dengan Product Name)")
         if not results['output1'].empty:
             # Show statistics
-            col_a, col_b = st.columns(2)
+            col_a, col_b, col_c = st.columns(3)
             with col_a:
                 bundle_count = results['output1']['Is Bundle?'].value_counts().get('Yes', 0)
                 st.metric("Bundle Items", bundle_count)
             with col_b:
                 single_count = results['output1']['Is Bundle?'].value_counts().get('No', 0)
                 st.metric("Single Items", single_count)
+            with col_c:
+                with_name = results['output1']['Product Name'].notna().sum()
+                st.metric("Dengan Product Name", with_name)
             
+            # Tampilkan dataframe
             st.dataframe(
                 results['output1'],
                 use_container_width=True,
                 hide_index=True,
-                height=400
+                height=400,
+                column_config={
+                    "Product Name": st.column_config.TextColumn(
+                        "Product Name",
+                        width="large"
+                    )
+                }
             )
+            
+            # Show missing product names
+            missing_names = results['output1'][results['output1']['Product Name'] == ""]
+            if not missing_names.empty:
+                st.warning(f"⚠️ {len(missing_names)} item tidak memiliki Product Name (tidak ditemukan di SKU Master)")
+                
+                with st.expander("Lihat item tanpa Product Name"):
+                    st.dataframe(missing_names[['Nomor Referensi SKU (Component/Cleaned)', 'Product Name']], 
+                               use_container_width=True)
         else:
             st.info("Tidak ada data detail order")
     
     with tab2:
-        st.subheader("Grand Total by SKU")
+        st.subheader("Grand Total by SKU (dengan Product Name)")
         if not results['output2'].empty:
-            st.dataframe(
-                results['output2'].sort_values('Jumlah (Grand total by SKU)', ascending=False),
-                use_container_width=True,
-                hide_index=True
-            )
+            # Tampilkan SKU dengan dan tanpa product name
+            with_names = results['output2'][results['output2']['Product Name'].notna()]
+            without_names = results['output2'][results['output2']['Product Name'].isna()]
             
-            # Bar chart
-            fig = px.bar(
-                results['output2'].sort_values('Jumlah (Grand total by SKU)', ascending=False).head(20),
-                x='Nomor Referensi SKU (Cleaned)',
-                y='Jumlah (Grand total by SKU)',
-                title="Top 20 SKUs by Quantity"
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            col_x, col_y = st.columns(2)
+            with col_x:
+                st.metric("SKU dengan Product Name", len(with_names))
+            with col_y:
+                st.metric("SKU tanpa Product Name", len(without_names))
+            
+            # Tabs untuk dengan dan tanpa product name
+            tab_a, tab_b = st.tabs(["✅ Dengan Product Name", "⚠️ Tanpa Product Name"])
+            
+            with tab_a:
+                if not with_names.empty:
+                    st.dataframe(
+                        with_names,
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                    
+                    # Bar chart untuk SKU dengan product name
+                    fig = px.bar(
+                        with_names.head(20),
+                        x='Product Name',
+                        y='Jumlah (Grand total by SKU)',
+                        title="Top 20 Products by Quantity",
+                        hover_data=['Nomor Referensi SKU (Cleaned)']
+                    )
+                    fig.update_xaxes(tickangle=45)
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("Tidak ada SKU dengan Product Name")
+            
+            with tab_b:
+                if not without_names.empty:
+                    st.dataframe(
+                        without_names[['Nomor Referensi SKU (Cleaned)', 'Jumlah (Grand total by SKU)']],
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                    st.info("SKU ini tidak ditemukan di SKU Master. Periksa file kamus.")
+                else:
+                    st.success("🎉 Semua SKU memiliki Product Name!")
         else:
             st.info("Tidak ada data SKU summary")
     
     with tab3:
         st.subheader("Order Summary by Courier")
         if not results['output3'].empty:
-            st.dataframe(
-                results['output3'],
-                use_container_width=True,
-                hide_index=True
-            )
+            col_i, col_ii = st.columns([2, 1])
             
-            # Pie chart
-            fig = px.pie(
-                results['output3'],
-                values='Total Order',
-                names='Opsi Pengiriman',
-                title="Distribution by Courier Service"
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            with col_i:
+                st.dataframe(
+                    results['output3'],
+                    use_container_width=True,
+                    hide_index=True
+                )
             
-            # Total orders
-            total = results['output3']['Total Order'].sum()
-            st.metric("Total Orders", total)
+            with col_ii:
+                total = results['output3']['Total Order'].sum()
+                st.metric("Total Orders", total)
+                
+                # Pie chart
+                fig = px.pie(
+                    results['output3'],
+                    values='Total Order',
+                    names='Opsi Pengiriman',
+                    title="Distribution by Courier Service",
+                    hole=0.3
+                )
+                st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("Tidak ada data courier summary")
     
     with tab4:
-        st.subheader("Download Results")
+        st.subheader("📥 Download Results")
         
         # Generate timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
         if not results['output1'].empty:
+            st.info("Pilih format download:")
+            
+            # Format selection
+            col_format1, col_format2 = st.columns(2)
+            with col_format1:
+                include_product_names = st.checkbox("Include Product Names", value=True)
+            with col_format2:
+                download_format = st.radio("Format", ["CSV", "Excel"], horizontal=True)
+            
+            st.divider()
+            
+            # Prepare data berdasarkan pilihan
+            if include_product_names:
+                download_df1 = results['output1']
+                download_df2 = results['output2']
+            else:
+                # Hilangkan kolom Product Name
+                download_df1 = results['output1'].drop(columns=['Product Name'], errors='ignore')
+                download_df2 = results['output2'].drop(columns=['Product Name'], errors='ignore')
+            
             col1, col2, col3 = st.columns(3)
             
-            with col1:
-                # Download Output 1
-                csv1 = results['output1'].to_csv(index=False, encoding='utf-8-sig')
+            if download_format == "CSV":
+                with col1:
+                    # Download Output 1
+                    csv1 = download_df1.to_csv(index=False, encoding='utf-8-sig')
+                    st.download_button(
+                        label="📥 Detail Order",
+                        data=csv1,
+                        file_name=f"detail_order_{timestamp}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+                
+                with col2:
+                    # Download Output 2
+                    csv2 = download_df2.to_csv(index=False, encoding='utf-8-sig')
+                    st.download_button(
+                        label="📥 SKU Summary",
+                        data=csv2,
+                        file_name=f"sku_summary_{timestamp}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+                
+                with col3:
+                    # Download Output 3
+                    csv3 = results['output3'].to_csv(index=False, encoding='utf-8-sig')
+                    st.download_button(
+                        label="📥 Courier Summary",
+                        data=csv3,
+                        file_name=f"courier_summary_{timestamp}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+            else:  # Excel format
+                # Download All as Excel
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    download_df1.to_excel(writer, sheet_name='Detail Order', index=False)
+                    download_df2.to_excel(writer, sheet_name='SKU Summary', index=False)
+                    results['output3'].to_excel(writer, sheet_name='Courier Summary', index=False)
+                    # Tambahkan sheet SKU Master sebagai reference
+                    results['sku_master'].to_excel(writer, sheet_name='SKU Master Ref', index=False)
+                
                 st.download_button(
-                    label="📥 Detail Order (CSV)",
-                    data=csv1,
-                    file_name=f"detail_order_{timestamp}.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                    help="Download detail order yang sudah di-expand"
+                    label="📊 Download All (Excel)",
+                    data=output.getvalue(),
+                    file_name=f"instant_sameday_report_{timestamp}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
                 )
             
-            with col2:
-                # Download Output 2
-                csv2 = results['output2'].to_csv(index=False, encoding='utf-8-sig')
-                st.download_button(
-                    label="📥 SKU Summary (CSV)",
-                    data=csv2,
-                    file_name=f"sku_summary_{timestamp}.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                    help="Download grand total per SKU"
-                )
-            
-            with col3:
-                # Download Output 3
-                csv3 = results['output3'].to_csv(index=False, encoding='utf-8-sig')
-                st.download_button(
-                    label="📥 Courier Summary (CSV)",
-                    data=csv3,
-                    file_name=f"courier_summary_{timestamp}.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                    help="Download summary per kurir"
-                )
-            
-            # Download All as Excel
+            # Quick download untuk yang sering dipakai
             st.divider()
-            st.subheader("📊 Download All in One Excel File")
+            st.subheader("🚀 Quick Downloads")
             
-            # Create Excel file with multiple sheets
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                results['output1'].to_excel(writer, sheet_name='Detail Order', index=False)
-                results['output2'].to_excel(writer, sheet_name='SKU Summary', index=False)
-                results['output3'].to_excel(writer, sheet_name='Courier Summary', index=False)
+            col_q1, col_q2 = st.columns(2)
+            with col_q1:
+                # Download untuk packing list (tanpa product name)
+                df_packing = results['output1'][['Nomor Referensi SKU (Component/Cleaned)', 'Jumlah dikalikan Component Quantity (Grand Total)']]
+                df_packing = df_packing.groupby('Nomor Referensi SKU (Component/Cleaned)').sum().reset_index()
+                csv_packing = df_packing.to_csv(index=False, encoding='utf-8-sig')
+                st.download_button(
+                    label="📦 Packing List (Qty per SKU)",
+                    data=csv_packing,
+                    file_name=f"packing_list_{timestamp}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
             
-            st.download_button(
-                label="📥 Download All (Excel)",
-                data=output.getvalue(),
-                file_name=f"instant_sameday_report_{timestamp}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-                help="Download semua hasil dalam 1 file Excel"
-            )
+            with col_q2:
+                # Download untuk tim kurir
+                df_courier = results['output1'][['No. Pesanan', 'Opsi Pengiriman', 'Nomor Referensi SKU Original']]
+                csv_courier = df_courier.drop_duplicates().to_csv(index=False, encoding='utf-8-sig')
+                st.download_button(
+                    label="🚚 Courier List (Per Order)",
+                    data=csv_courier,
+                    file_name=f"courier_list_{timestamp}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
         else:
             st.info("Tidak ada data untuk didownload")
 
@@ -499,45 +665,36 @@ else:
         
         4. Download hasil dalam format CSV atau Excel
         """)
+        
+        st.success("**✨ Fitur Baru:** Product Name otomatis di-lookup dari SKU Master!")
     
     with col2:
         st.image("https://cdn-icons-png.flaticon.com/512/3208/3208720.png", width=150)
     
     # Sample data structure
-    with st.expander("📝 Contoh Struktur File"):
+    with st.expander("📝 Contoh Struktur File Kamus"):
         col_a, col_b = st.columns(2)
         
         with col_a:
             st.write("""
-            **File Order harus memiliki kolom:**
-            - No. Pesanan
-            - Status Pesanan
-            - Pesanan yang Dikelola Shopee
-            - Opsi Pengiriman
-            - No. Resi
-            - Nomor Referensi SKU
-            - SKU Induk
-            - Nama Produk
-            - Jumlah
+            **Sheet: Kurir-Shopee**
+            | Opsi Pengiriman | Instant/Same Day |
+            |----------------|------------------|
+            | Instant        | Yes              |
+            | Same Day       | Yes              |
+            | Regular        | No               |
             """)
         
         with col_b:
             st.write("""
-            **File Kamus Master (Excel) harus berisi 3 sheet:**
-            1. **Kurir-Shopee**
-               - Opsi Pengiriman
-               - Instant/Same Day
-            
-            2. **Bundle Master**
-               - SKU Bundle
-               - SKU Component
-               - Component Quantity
-            
-            3. **SKU Master**
-               - Material (atau SKU Code)
-               - Material description
+            **Sheet: SKU Master**
+            | Material | Material description |
+            |----------|---------------------|
+            | SKU001   | Product A           |
+            | SKU002   | Product B           |
+            | SKU003   | Product C           |
             """)
 
 # Footer
 st.divider()
-st.caption("💡 Tips: File Kamus harus dalam format Excel (.xlsx) dengan 3 sheet seperti contoh di atas.")
+st.caption("💡 **Product Name Lookup:** SKU akan di-lookup ke SKU Master untuk mendapatkan nama produk. Pastikan SKU Master sudah lengkap!")
