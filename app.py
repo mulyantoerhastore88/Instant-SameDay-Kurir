@@ -8,22 +8,24 @@ import plotly.express as px
 
 # Page config
 st.set_page_config(
-    page_title="Instant & SameDay Processor",
-    page_icon="🚚",
+    page_title="Universal Order Processor",
+    page_icon="🛒",
     layout="wide"
 )
 
 # Title
-st.title("🚚 Instant & SameDay Order Processor")
-st.markdown("Upload file order dan kamus master, proses langsung di sini!")
+st.title("🛒 Universal Marketplace Order Processor")
+st.markdown("Proses order dari Shopee, Tokopedia, TikTok dalam 1 dashboard!")
 
 # Initialize session state
 if 'processed' not in st.session_state:
     st.session_state.processed = False
 if 'results' not in st.session_state:
     st.session_state.results = {}
+if 'marketplace_type' not in st.session_state:
+    st.session_state.marketplace_type = ""
 
-# --- FUNGSI CLEANING YANG LEBIH ROBUST ---
+# --- FUNGSI CLEANING ---
 def clean_sku(sku):
     """Konversi ke string, strip, dan ambil bagian kanan hyphen."""
     if pd.isna(sku):
@@ -48,13 +50,104 @@ def clean_sku(sku):
     
     return sku
 
-def clean_df_strings(df):
-    """Membersihkan semua kolom string dari spasi/karakter tak terlihat."""
-    for col in df.select_dtypes(include=['object']).columns:
-        df[col] = df[col].astype(str).apply(lambda x: x.strip() if pd.notna(x) else x)
-    return df
+# --- FUNGSI DETECT MARKETPLACE ---
+def detect_marketplace(df, filename=""):
+    """Deteksi tipe marketplace dari dataframe atau filename"""
+    
+    # Cek dari nama file
+    filename_lower = filename.lower()
+    if 'shopee' in filename_lower:
+        return 'shopee'
+    elif any(x in filename_lower for x in ['tokped', 'tokopedia', 'tiktok']):
+        return 'tokped_tiktok'
+    
+    # Cek dari kolom
+    columns_lower = [col.lower() for col in df.columns]
+    
+    # Deteksi Shopee
+    shopee_keywords = ['no. pesanan', 'status pesanan', 'pesanan yang dikelola shopee', 'opsi pengiriman']
+    if any(any(kw in col for kw in shopee_keywords) for col in columns_lower):
+        return 'shopee'
+    
+    # Deteksi Tokopedia/TikTok
+    tokped_keywords = ['order id', 'seller sku', 'sku id', 'fulfillment type']
+    if any(any(kw in col for kw in tokped_keywords) for col in columns_lower):
+        return 'tokped_tiktok'
+    
+    # Default ke unknown
+    return 'unknown'
 
-# --- FUNGSI LOOKUP BATCH UNTUK PERFORMANCE ---
+# --- FUNGSI STANDARDIZE DATA ---
+def standardize_shopee_data(df):
+    """Standardize Shopee data format"""
+    df_std = df.copy()
+    
+    # Mapping kolom Shopee ke standar
+    column_mapping = {
+        'No. Pesanan': 'order_id',
+        'Status Pesanan': 'status',
+        'Pesanan yang Dikelola Shopee': 'managed_by_platform',
+        'Opsi Pengiriman': 'shipping_option',
+        'No. Resi': 'tracking_id',
+        'Nomor Referensi SKU': 'sku_reference',
+        'SKU Induk': 'parent_sku',
+        'Nama Produk': 'product_name',
+        'Jumlah': 'quantity',
+        'Pesanan Harus Dikirimkan Sebelum (Menghindari keterlambatan)': 'deadline'
+    }
+    
+    # Rename kolom yang ada
+    for old_col, new_col in column_mapping.items():
+        if old_col in df_std.columns:
+            df_std.rename(columns={old_col: new_col}, inplace=True)
+    
+    # Tambahkan kolom marketplace
+    df_std['marketplace'] = 'shopee'
+    
+    # Pastikan kolom required ada
+    required_cols = ['order_id', 'status', 'managed_by_platform', 'shipping_option', 'tracking_id', 'sku_reference', 'quantity']
+    for col in required_cols:
+        if col not in df_std.columns:
+            df_std[col] = ""
+    
+    return df_std
+
+def standardize_tokped_data(df):
+    """Standardize Tokopedia/TikTok data format"""
+    df_std = df.copy()
+    
+    # Mapping kolom Tokped/TikTok ke standar
+    column_mapping = {
+        'Order ID': 'order_id',
+        'Order Status': 'status',
+        'Seller SKU': 'sku_reference',
+        'SKU ID': 'sku_id',
+        'Product Name': 'product_name',
+        'Quantity': 'quantity',
+        'Tracking ID': 'tracking_id',
+        'Fulfillment Type': 'fulfillment_type',
+        'Delivery Option': 'shipping_option',
+        'Created Time': 'created_time'
+    }
+    
+    # Rename kolom yang ada
+    for old_col, new_col in column_mapping.items():
+        if old_col in df_std.columns:
+            df_std.rename(columns={old_col: new_col}, inplace=True)
+    
+    # Tambahkan kolom untuk konsistensi dengan Shopee
+    df_std['managed_by_platform'] = 'No'  # Tokped biasanya bukan managed
+    df_std['marketplace'] = 'tokped_tiktok'
+    
+    # Pastikan kolom required ada
+    required_cols = ['order_id', 'status', 'sku_reference', 'quantity', 'tracking_id']
+    for col in required_cols:
+        if col not in df_std.columns:
+            df_std[col] = ""
+    
+    return df_std
+
+# --- FUNGSI LOOKUP BATCH ---
 @st.cache_data
 def create_sku_mapping(df_sku):
     """Buat mapping dictionary dari SKU Master untuk lookup cepat"""
@@ -113,48 +206,46 @@ def read_kamus_file(kamus_file):
             excel_file = pd.ExcelFile(kamus_file, engine='openpyxl')
             sheet_names = excel_file.sheet_names
             
-            # Cari nama sheet yang sesuai
-            sheets = {}
-            
-            # Cari sheet Kurir-Shopee (lebih fleksibel)
+            # Cari sheet Kurir-Shopee
             kurir_keywords = ['kurir', 'shopee', 'pengiriman', 'courier']
             kurir_sheets = [s for s in sheet_names if any(kw in s.lower() for kw in kurir_keywords)]
             
             if kurir_sheets:
-                sheets['kurir'] = pd.read_excel(kamus_file, sheet_name=kurir_sheets[0], engine='openpyxl')
+                df_kurir = pd.read_excel(kamus_file, sheet_name=kurir_sheets[0], engine='openpyxl')
             else:
-                # Coba sheet pertama
-                sheets['kurir'] = pd.read_excel(kamus_file, sheet_name=0, engine='openpyxl')
+                df_kurir = pd.read_excel(kamus_file, sheet_name=0, engine='openpyxl')
             
             # Cari sheet Bundle Master
             bundle_keywords = ['bundle', 'bundling', 'paket']
             bundle_sheets = [s for s in sheet_names if any(kw in s.lower() for kw in bundle_keywords)]
             
             if bundle_sheets:
-                sheets['bundle'] = pd.read_excel(kamus_file, sheet_name=bundle_sheets[0], engine='openpyxl')
+                df_bundle = pd.read_excel(kamus_file, sheet_name=bundle_sheets[0], engine='openpyxl')
             else:
-                # Coba sheet kedua atau pertama
                 if len(sheet_names) > 1:
-                    sheets['bundle'] = pd.read_excel(kamus_file, sheet_name=1, engine='openpyxl')
+                    df_bundle = pd.read_excel(kamus_file, sheet_name=1, engine='openpyxl')
                 else:
-                    sheets['bundle'] = pd.read_excel(kamus_file, sheet_name=0, engine='openpyxl')
+                    df_bundle = pd.read_excel(kamus_file, sheet_name=0, engine='openpyxl')
             
             # Cari sheet SKU Master
             sku_keywords = ['sku', 'master', 'produk', 'product', 'material']
             sku_sheets = [s for s in sheet_names if any(kw in s.lower() for kw in sku_keywords)]
             
             if sku_sheets:
-                sheets['sku'] = pd.read_excel(kamus_file, sheet_name=sku_sheets[0], engine='openpyxl')
+                df_sku = pd.read_excel(kamus_file, sheet_name=sku_sheets[0], engine='openpyxl')
             else:
-                # Coba sheet ketiga atau lainnya
                 if len(sheet_names) > 2:
-                    sheets['sku'] = pd.read_excel(kamus_file, sheet_name=2, engine='openpyxl')
+                    df_sku = pd.read_excel(kamus_file, sheet_name=2, engine='openpyxl')
                 elif len(sheet_names) > 1:
-                    sheets['sku'] = pd.read_excel(kamus_file, sheet_name=1, engine='openpyxl')
+                    df_sku = pd.read_excel(kamus_file, sheet_name=1, engine='openpyxl')
                 else:
-                    sheets['sku'] = pd.read_excel(kamus_file, sheet_name=0, engine='openpyxl')
+                    df_sku = pd.read_excel(kamus_file, sheet_name=0, engine='openpyxl')
             
-            return sheets
+            return {
+                'kurir': df_kurir,
+                'bundle': df_bundle,
+                'sku': df_sku
+            }
             
         else:
             st.error("File kamus harus dalam format Excel (.xlsx atau .xls)")
@@ -164,129 +255,24 @@ def read_kamus_file(kamus_file):
         st.error(f"Error membaca file kamus: {str(e)}")
         return None
 
-# --- FUNGSI PROCESSING UTAMA YANG DIOPTIMASI ---
-def process_data(df_orders, kamus_data):
-    """Logika processing utama dengan optimasi"""
+# --- FUNGSI PROCESSING UTAMA ---
+def process_universal_data(df_orders_list, kamus_data, marketplace_types):
+    """Process data dari multiple marketplace"""
     
-    # Start timer
     start_time = time.time()
+    all_expanded_rows = []
     
-    # Extract data dari kamus
-    df_kurir = kamus_data['kurir'].copy()
+    # Prepare SKU mapping
+    sku_mapping = create_sku_mapping(kamus_data['sku'])
+    
+    # Clean bundle data
     df_bundle = kamus_data['bundle'].copy()
-    df_sku = kamus_data['sku'].copy()
-    
-    # --- PREPARE SKU MAPPING (FAST LOOKUP) ---
-    sku_mapping = create_sku_mapping(df_sku)
-    
-    # --- CLEANING DATA MASTER ---
-    df_bundle = clean_df_strings(df_bundle)
-    
-    # Clean SKU Bundle column
     if 'SKU Bundle' in df_bundle.columns:
         df_bundle['SKU Bundle'] = df_bundle['SKU Bundle'].apply(clean_sku)
-    else:
-        # Cari kolom yang mungkin berisi SKU Bundle
-        for col in df_bundle.columns:
-            if 'bundle' in col.lower():
-                df_bundle.rename(columns={col: 'SKU Bundle'}, inplace=True)
-                df_bundle['SKU Bundle'] = df_bundle['SKU Bundle'].apply(clean_sku)
-                break
     
-    # --- CLEAN ORDERS DATA ---
-    df_orders.columns = df_orders.columns.astype(str).str.strip()
-    
-    # Pastikan kolom yang diperlukan ada
-    required_cols = ['Status Pesanan', 'Pesanan yang Dikelola Shopee', 'Opsi Pengiriman', 'No. Resi', 'Jumlah']
-    for col in required_cols:
-        if col not in df_orders.columns:
-            # Cari kolom dengan nama mirip
-            for actual_col in df_orders.columns:
-                if col.lower() in actual_col.lower():
-                    df_orders.rename(columns={actual_col: col}, inplace=True)
-                    break
-            if col not in df_orders.columns:
-                if col == 'Jumlah':
-                    df_orders[col] = 1
-                else:
-                    df_orders[col] = ""
-    
-    # Cleaning
-    df_orders['Status Pesanan'] = df_orders['Status Pesanan'].astype(str).str.strip()
-    df_orders['Pesanan yang Dikelola Shopee'] = df_orders['Pesanan yang Dikelola Shopee'].astype(str).str.strip()
-    df_orders['Opsi Pengiriman'] = df_orders['Opsi Pengiriman'].astype(str).str.strip()
-    df_orders['No. Resi'] = df_orders['No. Resi'].astype(str).str.strip()
-    df_orders['Is Resi Blank'] = (df_orders['No. Resi'] == '') | (df_orders['No. Resi'].isna()) | (df_orders['No. Resi'].str.lower() == 'nan')
-    
-    # --- PREPARE KURIR FILTER ---
-    # Cari kolom Instant/Same Day
-    instant_col = None
-    for col in df_kurir.columns:
-        if any(keyword in col.lower() for keyword in ['instant', 'same', 'day']):
-            instant_col = col
-            df_kurir.rename(columns={col: 'Instant/Same Day'}, inplace=True)
-            break
-    
-    if 'Instant/Same Day' not in df_kurir.columns:
-        # Default ke kolom kedua jika ada
-        if len(df_kurir.columns) > 1:
-            df_kurir.rename(columns={df_kurir.columns[1]: 'Instant/Same Day'}, inplace=True)
-        else:
-            st.error("Kolom 'Instant/Same Day' tidak ditemukan di Kurir Master")
-            return None
-    
-    # Clean kurir data
-    df_kurir['Opsi Pengiriman'] = df_kurir.iloc[:, 0].astype(str).str.strip()
-    df_kurir['Instant/Same Day'] = df_kurir['Instant/Same Day'].astype(str).str.strip()
-    
-    # Get instant/same day options
-    instant_same_day_options = df_kurir[
-        df_kurir['Instant/Same Day'].str.upper().str.strip().isin(['YES', 'YA', '1', 'TRUE', 'Y', 'IYA'])
-    ]['Opsi Pengiriman'].unique()
-    
-    # --- FILTER ORDERS ---
-    df_filtered = df_orders[
-        (df_orders['Status Pesanan'].str.upper() == 'PERLU DIKIRIM') &
-        (df_orders['Pesanan yang Dikelola Shopee'].str.upper().isin(['NO', 'TIDAK', 'FALSE'])) &
-        (df_orders['Opsi Pengiriman'].isin(instant_same_day_options)) &
-        (df_orders['Is Resi Blank'] == True)
-    ].copy()
-    
-    if df_filtered.empty:
-        return {"error": "❌ Tidak ada data yang memenuhi kriteria filter."}
-    
-    # --- SKU AWAL CLEANING ---
-    # Cari kolom SKU
-    sku_columns = []
-    for col in df_filtered.columns:
-        if any(keyword in col.lower() for keyword in ['sku', 'referensi', 'produk', 'nama']):
-            sku_columns.append(col)
-    
-    if sku_columns:
-        df_filtered['SKU Awal'] = df_filtered[sku_columns[0]]
-        for col in sku_columns[1:]:
-            df_filtered['SKU Awal'] = df_filtered['SKU Awal'].fillna(df_filtered[col])
-    else:
-        df_filtered['SKU Awal'] = ""
-    
-    df_filtered['SKU Awal'] = df_filtered['SKU Awal'].apply(clean_sku)
-    
-    # --- BUNDLE EXPANSION (OPTIMIZED) ---
-    sku_bundle_list = df_bundle['SKU Bundle'].unique() if 'SKU Bundle' in df_bundle.columns else []
-    
-    # Buat mapping bundle untuk lookup cepat
+    # Prepare bundle mapping
     bundle_mapping = {}
-    if 'SKU Component' in df_bundle.columns:
-        component_col = 'SKU Component'
-    else:
-        # Cari kolom component
-        component_col = None
-        for col in df_bundle.columns:
-            if any(keyword in col.lower() for keyword in ['component', 'item', 'produk']):
-                component_col = col
-                break
-        if not component_col and len(df_bundle.columns) > 1:
-            component_col = df_bundle.columns[1]
+    component_col = 'SKU Component' if 'SKU Component' in df_bundle.columns else df_bundle.columns[1] if len(df_bundle.columns) > 1 else None
     
     if component_col:
         for bundle_sku, group in df_bundle.groupby('SKU Bundle'):
@@ -296,203 +282,251 @@ def process_data(df_orders, kamus_data):
                 qty = row.get('Component Quantity', 1) if 'Component Quantity' in row else 1
                 bundle_mapping[bundle_sku].append((component_sku, qty))
     
-    # Process expansion
-    expanded_rows = []
+    # Prepare kurir filter untuk Shopee
+    df_kurir = kamus_data['kurir'].copy()
+    instant_same_day_options = []
     
-    for _, row in df_filtered.iterrows():
-        sku_awal_cleaned = row['SKU Awal']
-        original_sku_raw = row.get('Nomor Referensi SKU', row.get('SKU Awal', ''))
-        quantity = row.get('Jumlah', 1)
+    if 'Instant/Same Day' in df_kurir.columns:
+        df_kurir['Opsi Pengiriman'] = df_kurir.iloc[:, 0].astype(str).str.strip()
+        df_kurir['Instant/Same Day'] = df_kurir['Instant/Same Day'].astype(str).str.strip()
         
-        if sku_awal_cleaned and sku_awal_cleaned in bundle_mapping:
-            # Bundle ditemukan
-            for component_sku, comp_qty in bundle_mapping[sku_awal_cleaned]:
-                expanded_rows.append({
-                    'No. Pesanan': row.get('No. Pesanan', ''),
-                    'Status Pesanan': row.get('Status Pesanan', ''),
-                    'Opsi Pengiriman': row.get('Opsi Pengiriman', ''),
-                    'Nomor Referensi SKU Original': original_sku_raw,
-                    'Is Bundle?': 'Yes',
-                    'SKU Component': component_sku,
-                    'Jumlah Final': quantity * comp_qty,
-                })
+        instant_same_day_options = df_kurir[
+            df_kurir['Instant/Same Day'].str.upper().str.strip().isin(['YES', 'YA', '1', 'TRUE', 'Y', 'IYA'])
+        ]['Opsi Pengiriman'].unique()
+    
+    # Process each marketplace data
+    for idx, (df_orders, marketplace_type) in enumerate(zip(df_orders_list, marketplace_types)):
+        
+        # Standardize data
+        if marketplace_type == 'shopee':
+            df_std = standardize_shopee_data(df_orders)
+            
+            # Filter untuk Shopee
+            df_filtered = df_std[
+                (df_std['status'].str.upper() == 'PERLU DIKIRIM') &
+                (df_std['managed_by_platform'].str.upper().isin(['NO', 'TIDAK', 'FALSE'])) &
+                (df_std['shipping_option'].isin(instant_same_day_options)) &
+                ((df_std['tracking_id'] == '') | df_std['tracking_id'].isna())
+            ].copy()
+            
+        elif marketplace_type == 'tokped_tiktok':
+            df_std = standardize_tokped_data(df_orders)
+            
+            # Filter untuk Tokped/TikTok (default semua instant, no tracking)
+            df_filtered = df_std[
+                ((df_std['tracking_id'] == '') | df_std['tracking_id'].isna())
+            ].copy()
+        
         else:
-            # Item satuan
-            expanded_rows.append({
-                'No. Pesanan': row.get('No. Pesanan', ''),
-                'Status Pesanan': row.get('Status Pesanan', ''),
-                'Opsi Pengiriman': row.get('Opsi Pengiriman', ''),
-                'Nomor Referensi SKU Original': original_sku_raw,
-                'Is Bundle?': 'No',
-                'SKU Component': sku_awal_cleaned,
-                'Jumlah Final': quantity * 1,
-            })
-    
-    df_bundle_expanded = pd.DataFrame(expanded_rows)
-    
-    # --- ADD PRODUCT NAMES (BATCH PROCESSING) ---
-    if not df_bundle_expanded.empty:
-        # Batch lookup untuk semua SKU sekaligus
-        sku_components = df_bundle_expanded['SKU Component'].tolist()
-        product_names = lookup_product_name_batch(sku_mapping, sku_components)
-        df_bundle_expanded['Product Name'] = product_names
-    
-    # --- PREPARE OUTPUTS ---
-    # Output 1: Detail Order
-    df_output1 = df_bundle_expanded.copy()
-    df_output1 = df_output1[[
-        'No. Pesanan', 'Status Pesanan', 'Opsi Pengiriman',
-        'Nomor Referensi SKU Original', 'Is Bundle?',
-        'SKU Component', 'Product Name', 'Jumlah Final'
-    ]]
-    
-    df_output1 = df_output1.rename(columns={
-        'SKU Component': 'Nomor Referensi SKU (Component/Cleaned)',
-        'Jumlah Final': 'Jumlah dikalikan Component Quantity (Grand Total)'
-    })
-    
-    # Output 2: Grand Total per SKU
-    if not df_bundle_expanded.empty:
-        df_output2 = df_bundle_expanded.groupby(['SKU Component', 'Product Name']).agg(
-            {'Jumlah Final': 'sum'}
-        ).reset_index()
+            continue
         
-        df_output2 = df_output2.rename(columns={
-            'SKU Component': 'Nomor Referensi SKU (Cleaned)',
-            'Jumlah Final': 'Jumlah (Grand total by SKU)'
-        }).sort_values('Jumlah (Grand total by SKU)', ascending=False)
-    else:
-        df_output2 = pd.DataFrame(columns=['Nomor Referensi SKU (Cleaned)', 'Product Name', 'Jumlah (Grand total by SKU)'])
+        if df_filtered.empty:
+            continue
+        
+        # Clean SKU
+        df_filtered['sku_clean'] = df_filtered['sku_reference'].apply(clean_sku)
+        
+        # Bundle expansion
+        for _, row in df_filtered.iterrows():
+            sku_clean = row['sku_clean']
+            order_id = row['order_id']
+            quantity = row['quantity']
+            marketplace = row.get('marketplace', marketplace_type)
+            
+            if sku_clean in bundle_mapping:
+                # Bundle ditemukan
+                for component_sku, comp_qty in bundle_mapping[sku_clean]:
+                    all_expanded_rows.append({
+                        'Marketplace': marketplace,
+                        'Order ID': order_id,
+                        'Status': row.get('status', ''),
+                        'Shipping Option': row.get('shipping_option', ''),
+                        'Original SKU': row.get('sku_reference', ''),
+                        'Is Bundle': 'Yes',
+                        'SKU Component': component_sku,
+                        'Quantity Final': quantity * comp_qty,
+                    })
+            else:
+                # Item satuan
+                all_expanded_rows.append({
+                    'Marketplace': marketplace,
+                    'Order ID': order_id,
+                    'Status': row.get('status', ''),
+                    'Shipping Option': row.get('shipping_option', ''),
+                    'Original SKU': row.get('sku_reference', ''),
+                    'Is Bundle': 'No',
+                    'SKU Component': sku_clean,
+                    'Quantity Final': quantity * 1,
+                })
     
-    # Output 3: Order Summarize
-    df_output3 = df_filtered.groupby('Opsi Pengiriman').agg(
-        {'No. Pesanan': 'nunique'}
-    ).reset_index().rename(columns={'No. Pesanan': 'Total Order'})
+    if not all_expanded_rows:
+        return {"error": "❌ Tidak ada data yang memenuhi kriteria filter."}
     
-    # End timer
+    # Convert to DataFrame
+    df_expanded = pd.DataFrame(all_expanded_rows)
+    
+    # Add product names
+    if not df_expanded.empty:
+        sku_components = df_expanded['SKU Component'].tolist()
+        product_names = lookup_product_name_batch(sku_mapping, sku_components)
+        df_expanded['Product Name'] = product_names
+    
+    # Prepare outputs
     end_time = time.time()
     processing_time = end_time - start_time
     
-    # Hitung missing SKUs
+    # Output 1: Detail Order
+    df_output1 = df_expanded.copy()
+    
+    # Output 2: SKU Summary (group by marketplace + sku)
+    if not df_expanded.empty:
+        df_output2 = df_expanded.groupby(['Marketplace', 'SKU Component', 'Product Name']).agg({
+            'Quantity Final': 'sum'
+        }).reset_index()
+        df_output2 = df_output2.rename(columns={
+            'Quantity Final': 'Total Quantity'
+        }).sort_values('Total Quantity', ascending=False)
+    else:
+        df_output2 = pd.DataFrame(columns=['Marketplace', 'SKU Component', 'Product Name', 'Total Quantity'])
+    
+    # Output 3: Marketplace Summary
+    marketplace_summary = []
+    for marketplace_type in set(marketplace_types):
+        orders_count = df_expanded[df_expanded['Marketplace'] == marketplace_type]['Order ID'].nunique()
+        items_count = df_expanded[df_expanded['Marketplace'] == marketplace_type].shape[0]
+        marketplace_summary.append({
+            'Marketplace': marketplace_type,
+            'Total Orders': orders_count,
+            'Total Items': items_count
+        })
+    
+    df_output3 = pd.DataFrame(marketplace_summary)
+    
+    # Count missing SKUs
     missing_skus = []
-    if not df_bundle_expanded.empty:
-        missing_mask = df_bundle_expanded['Product Name'].isna() | (df_bundle_expanded['Product Name'] == '')
-        missing_skus = df_bundle_expanded.loc[missing_mask, 'SKU Component'].unique().tolist()
+    if not df_expanded.empty:
+        missing_mask = df_expanded['Product Name'].isna() | (df_expanded['Product Name'] == '')
+        missing_skus = df_expanded.loc[missing_mask, 'SKU Component'].unique().tolist()
     
     return {
         'output1': df_output1,
         'output2': df_output2,
         'output3': df_output3,
-        'filtered_count': len(df_filtered),
-        'expanded_count': len(df_bundle_expanded),
-        'original_count': len(df_orders),
-        'sku_master': df_sku,
-        'sku_mapping': sku_mapping,
         'processing_time': processing_time,
-        'missing_skus': missing_skus
+        'missing_skus': missing_skus,
+        'total_orders': df_expanded['Order ID'].nunique(),
+        'total_items': len(df_expanded),
+        'marketplaces': list(set(marketplace_types))
     }
 
-# --- SIDEBAR UPLOAD ---
-with st.sidebar:
-    st.header("📁 Upload Files")
-    
-    # Upload section
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("1. File Order")
-        order_file = st.file_uploader(
-            "Upload CSV/Excel",
-            type=['csv', 'xlsx', 'xls'],
-            key="order",
-            label_visibility="collapsed"
-        )
-    
-    with col2:
-        st.subheader("2. File Kamus")
-        kamus_file = st.file_uploader(
-            "Upload Excel",
-            type=['xlsx', 'xls'],
-            key="kamus",
-            label_visibility="collapsed"
-        )
-    
-    if order_file:
-        st.success(f"✅ Order: {order_file.name}")
-    if kamus_file:
-        st.success(f"✅ Kamus: {kamus_file.name}")
-    
-    st.divider()
-    
-    # Process button dengan status
-    if order_file and kamus_file:
-        if st.button("🚀 PROCESS DATA", type="primary", width='stretch'):
-            st.session_state.order_file = order_file
-            st.session_state.kamus_file = kamus_file
-            st.rerun()
-    else:
-        st.button("🚀 PROCESS DATA", type="primary", width='stretch', disabled=True)
-    
-    st.divider()
-    st.caption("⚡ Optimized v4.1 | Fast Processing")
+# --- MAIN UI ---
+st.sidebar.header("📁 Upload Files")
 
-# MAIN CONTENT - Processing
-if hasattr(st.session_state, 'order_file') and hasattr(st.session_state, 'kamus_file'):
-    order_file = st.session_state.order_file
-    kamus_file = st.session_state.kamus_file
-    
-    with st.spinner(f"Processing {order_file.name}..."):
-        try:
-            # Read files
-            if order_file.name.endswith('.csv'):
-                df_orders = pd.read_csv(order_file)
-            else:
-                df_orders = pd.read_excel(order_file, engine='openpyxl')
-            
-            kamus_data = read_kamus_file(kamus_file)
-            
-            if kamus_data:
-                # Process dengan progress indicators
-                results = process_data(df_orders, kamus_data)
+# Marketplace selection
+st.sidebar.subheader("1. Pilih Marketplace")
+marketplace_options = st.sidebar.multiselect(
+    "Pilih marketplace yang akan diproses:",
+    ["Shopee", "Tokopedia/TikTok"],
+    default=["Shopee", "Tokopedia/TikTok"]
+)
+
+uploaded_files = {}
+marketplace_types = []
+
+# File upload sections
+st.sidebar.subheader("2. Upload File Order")
+
+if "Shopee" in marketplace_options:
+    shopee_file = st.sidebar.file_uploader(
+        "📦 File Order Shopee",
+        type=['csv', 'xlsx', 'xls'],
+        key="shopee"
+    )
+    if shopee_file:
+        uploaded_files['shopee'] = shopee_file
+        marketplace_types.append('shopee')
+
+if "Tokopedia/TikTok" in marketplace_options:
+    tokped_file = st.sidebar.file_uploader(
+        "🛍️ File Order Tokopedia/TikTok",
+        type=['csv', 'xlsx', 'xls'],
+        key="tokped"
+    )
+    if tokped_file:
+        uploaded_files['tokped_tiktok'] = tokped_file
+        marketplace_types.append('tokped_tiktok')
+
+st.sidebar.subheader("3. Upload File Kamus")
+kamus_file = st.sidebar.file_uploader(
+    "📚 File Kamus Master (Excel)",
+    type=['xlsx', 'xls'],
+    key="kamus"
+)
+
+st.sidebar.divider()
+
+# Process button
+if uploaded_files and kamus_file and marketplace_types:
+    if st.sidebar.button("🚀 PROCESS ALL DATA", type="primary", width='stretch'):
+        with st.spinner("Memproses data dari semua marketplace..."):
+            try:
+                # Read all order files
+                df_orders_list = []
+                processed_marketplace_types = []
                 
-                if results and "error" not in results:
-                    st.session_state.results = results
-                    st.session_state.processed = True
+                for mtype, file in uploaded_files.items():
+                    if file.name.endswith('.csv'):
+                        df = pd.read_csv(file)
+                    else:
+                        df = pd.read_excel(file, engine='openpyxl')
                     
-                    # Clear file references
-                    if hasattr(st.session_state, 'order_file'):
-                        del st.session_state.order_file
-                    if hasattr(st.session_state, 'kamus_file'):
-                        del st.session_state.kamus_file
+                    df_orders_list.append(df)
+                    processed_marketplace_types.append(mtype)
+                
+                # Read kamus file
+                kamus_data = read_kamus_file(kamus_file)
+                
+                if kamus_data:
+                    # Process data
+                    results = process_universal_data(df_orders_list, kamus_data, processed_marketplace_types)
                     
-                    st.rerun()
-                elif results and "error" in results:
-                    st.error(results["error"])
-                else:
-                    st.error("❌ Processing failed")
-        
-        except Exception as e:
-            st.error(f"❌ Error: {str(e)}")
-            import traceback
-            with st.expander("Error Details"):
-                st.code(traceback.format_exc())
+                    if results and "error" not in results:
+                        st.session_state.results = results
+                        st.session_state.processed = True
+                        st.session_state.marketplace_type = "universal"
+                        st.success("✅ Semua data berhasil diproses!")
+                        st.rerun()
+                    elif results and "error" in results:
+                        st.error(results["error"])
+                    else:
+                        st.error("❌ Processing failed")
+            
+            except Exception as e:
+                st.error(f"❌ Error: {str(e)}")
+                import traceback
+                with st.expander("Error Details"):
+                    st.code(traceback.format_exc())
+else:
+    st.sidebar.button("🚀 PROCESS ALL DATA", type="primary", width='stretch', disabled=True)
 
-# Display results jika sudah processed
+st.sidebar.divider()
+st.sidebar.caption("🌐 Universal Processor v1.0")
+
+# Display results
 if st.session_state.processed and 'results' in st.session_state:
     results = st.session_state.results
     
-    # Header dengan metrics - FIX: cek key existence
-    if 'processing_time' in results:
-        st.success(f"✅ Processing completed in {results['processing_time']:.1f}s")
-    else:
-        st.success("✅ Processing completed")
+    # Header
+    st.success(f"✅ Processing completed in {results.get('processing_time', 0):.1f}s")
     
+    # Metrics
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Original Orders", results.get('original_count', 0))
+        st.metric("Total Orders", results.get('total_orders', 0))
     with col2:
-        st.metric("Filtered Orders", results.get('filtered_count', 0))
+        st.metric("Total Items", results.get('total_items', 0))
     with col3:
-        st.metric("Expanded Items", results.get('expanded_count', 0))
+        st.metric("Marketplaces", len(results.get('marketplaces', [])))
     with col4:
         if not results['output1'].empty:
             matched = results['output1']['Product Name'].notna().sum()
@@ -502,102 +536,57 @@ if st.session_state.processed and 'results' in st.session_state:
         else:
             st.metric("Product Name Match", "0%")
     
-    # Warning jika ada SKU yang tidak ketemu
+    # Warning untuk missing SKUs
     if 'missing_skus' in results and len(results['missing_skus']) > 0:
         st.warning(f"⚠️ {len(results['missing_skus'])} SKU tidak memiliki Product Name")
-        
-        with st.expander("🔍 Debug SKU Mismatch", expanded=False):
-            st.write("**SKU yang tidak ditemukan:**")
-            st.write(results['missing_skus'][:50])  # Limit 50
-            
-            st.write("**Contoh SKU Master:**")
-            st.dataframe(results['sku_master'].head(10), width='stretch')
-            
-            # Advanced debugging
-            if st.button("Run Deep Debug"):
-                st.write("**Deep Debug Analysis:**")
-                
-                # Bandingkan format
-                if results['missing_skus']:
-                    sample_missing = results['missing_skus'][0]
-                    st.write(f"Sample missing: '{sample_missing}'")
-                    st.write(f"Length: {len(sample_missing)} chars")
-                    st.write(f"ASCII codes: {[ord(c) for c in sample_missing[:10]]}")
-                    
-                    # Cari di SKU Master dengan berbagai cara
-                    st.write("**Search in SKU Master:**")
-                    
-                    df_sku = results['sku_master']
-                    found_anywhere = False
-                    
-                    for col in df_sku.columns:
-                        # Coba exact match
-                        exact_matches = df_sku[df_sku[col].astype(str).str.strip() == sample_missing]
-                        if not exact_matches.empty:
-                            st.write(f"✅ Exact match in column '{col}':")
-                            st.write(exact_matches.head())
-                            found_anywhere = True
-                        
-                        # Coba partial match
-                        partial_matches = df_sku[df_sku[col].astype(str).str.contains(sample_missing, na=False)]
-                        if not partial_matches.empty:
-                            st.write(f"🔍 Partial match in column '{col}':")
-                            st.write(partial_matches.head())
-                            found_anywhere = True
-                    
-                    if not found_anywhere:
-                        st.write("❌ Not found in any column")
-                        
-                        # Tampilkan SKU yang mirip
-                        st.write("**Similar SKUs in master:**")
-                        for col in df_sku.columns:
-                            if df_sku[col].dtype == 'object':
-                                similar = df_sku[df_sku[col].astype(str).str.contains(sample_missing[:5], na=False)]
-                                if not similar.empty:
-                                    st.write(f"In column '{col}':")
-                                    st.write(similar.head())
     
-    # Tabs untuk output
+    # Tabs
     tab1, tab2, tab3, tab4 = st.tabs([
         "📋 Detail Order", 
         "📦 SKU Summary", 
-        "📊 Statistics", 
+        "📊 Marketplace Summary", 
         "💾 Download"
     ])
     
     with tab1:
-        st.subheader("Detail Order")
+        st.subheader("Detail Order (All Marketplaces)")
         
         if results['output1'].empty:
             st.info("Tidak ada data detail order")
         else:
             # Filter options
-            col_filter1, col_filter2 = st.columns(2)
-            with col_filter1:
-                show_bundles = st.selectbox(
-                    "Show",
-                    ["All", "Bundles Only", "Singles Only"],
-                    key="filter_bundle"
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                marketplace_filter = st.multiselect(
+                    "Filter Marketplace",
+                    options=results['output1']['Marketplace'].unique(),
+                    default=results['output1']['Marketplace'].unique()
                 )
-            
-            with col_filter2:
-                show_product_name = st.selectbox(
+            with col2:
+                bundle_filter = st.selectbox(
+                    "Bundle Type",
+                    ["All", "Bundle Only", "Single Only"]
+                )
+            with col3:
+                name_filter = st.selectbox(
                     "Product Name",
-                    ["All", "With Name", "Without Name"],
-                    key="filter_name"
+                    ["All", "With Name", "Without Name"]
                 )
             
             # Apply filters
             df_display = results['output1'].copy()
             
-            if show_bundles == "Bundles Only":
-                df_display = df_display[df_display['Is Bundle?'] == 'Yes']
-            elif show_bundles == "Singles Only":
-                df_display = df_display[df_display['Is Bundle?'] == 'No']
+            if marketplace_filter:
+                df_display = df_display[df_display['Marketplace'].isin(marketplace_filter)]
             
-            if show_product_name == "With Name":
+            if bundle_filter == "Bundle Only":
+                df_display = df_display[df_display['Is Bundle'] == 'Yes']
+            elif bundle_filter == "Single Only":
+                df_display = df_display[df_display['Is Bundle'] == 'No']
+            
+            if name_filter == "With Name":
                 df_display = df_display[df_display['Product Name'].notna() & (df_display['Product Name'] != '')]
-            elif show_product_name == "Without Name":
+            elif name_filter == "Without Name":
                 df_display = df_display[df_display['Product Name'].isna() | (df_display['Product Name'] == '')]
             
             st.dataframe(
@@ -607,50 +596,50 @@ if st.session_state.processed and 'results' in st.session_state:
             )
     
     with tab2:
-        st.subheader("SKU Summary")
+        st.subheader("SKU Summary (Per Marketplace)")
         
         if results['output2'].empty:
             st.info("Tidak ada data SKU summary")
         else:
-            # Tampilkan SKU dengan dan tanpa product name
-            with_names = results['output2'][results['output2']['Product Name'].notna() & (results['output2']['Product Name'] != '')]
-            without_names = results['output2'][results['output2']['Product Name'].isna() | (results['output2']['Product Name'] == '')]
+            # Group by marketplace untuk tabs
+            marketplaces = results['output2']['Marketplace'].unique()
             
-            col_x, col_y = st.columns(2)
-            with col_x:
-                st.metric("SKU dengan Product Name", len(with_names))
-            with col_y:
-                st.metric("SKU tanpa Product Name", len(without_names))
+            # Buat tabs untuk setiap marketplace
+            sku_tabs = st.tabs([f"📦 {mp}" for mp in marketplaces])
             
-            # Tabs untuk dengan dan tanpa product name
-            tab_a, tab_b = st.tabs(["✅ Dengan Product Name", "⚠️ Tanpa Product Name"])
-            
-            with tab_a:
-                if not with_names.empty:
-                    st.dataframe(
-                        with_names,
-                        width='stretch',
-                        hide_index=True
-                    )
-                else:
-                    st.info("Tidak ada SKU dengan Product Name")
-            
-            with tab_b:
-                if not without_names.empty:
-                    st.dataframe(
-                        without_names[['Nomor Referensi SKU (Cleaned)', 'Jumlah (Grand total by SKU)']],
-                        width='stretch',
-                        hide_index=True
-                    )
-                    st.info("SKU ini tidak ditemukan di SKU Master. Periksa file kamus.")
-                else:
-                    st.success("🎉 Semua SKU memiliki Product Name!")
+            for idx, mp in enumerate(marketplaces):
+                with sku_tabs[idx]:
+                    df_mp = results['output2'][results['output2']['Marketplace'] == mp]
+                    
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.metric(f"Total SKU di {mp}", len(df_mp))
+                    with col_b:
+                        with_names = df_mp[df_mp['Product Name'].notna() & (df_mp['Product Name'] != '')]
+                        st.metric(f"Dengan Product Name", len(with_names))
+                    
+                    # Tabs untuk dengan/tanpa product name
+                    sub_tab1, sub_tab2 = st.tabs(["✅ Dengan Nama", "⚠️ Tanpa Nama"])
+                    
+                    with sub_tab1:
+                        df_with = df_mp[df_mp['Product Name'].notna() & (df_mp['Product Name'] != '')]
+                        if not df_with.empty:
+                            st.dataframe(df_with, width='stretch')
+                        else:
+                            st.info(f"Tidak ada SKU dengan Product Name di {mp}")
+                    
+                    with sub_tab2:
+                        df_without = df_mp[df_mp['Product Name'].isna() | (df_mp['Product Name'] == '')]
+                        if not df_without.empty:
+                            st.dataframe(df_without[['SKU Component', 'Total Quantity']], width='stretch')
+                        else:
+                            st.success(f"🎉 Semua SKU memiliki Product Name di {mp}")
     
     with tab3:
-        st.subheader("Statistics")
+        st.subheader("Marketplace Summary")
         
         if results['output3'].empty:
-            st.info("Tidak ada data statistics")
+            st.info("Tidak ada data summary")
         else:
             col_i, col_ii = st.columns([2, 1])
             
@@ -662,8 +651,15 @@ if st.session_state.processed and 'results' in st.session_state:
                 )
             
             with col_ii:
-                total = results['output3']['Total Order'].sum()
-                st.metric("Total Orders", total)
+                # Pie chart
+                fig = px.pie(
+                    results['output3'],
+                    values='Total Orders',
+                    names='Marketplace',
+                    title="Order Distribution by Marketplace",
+                    hole=0.3
+                )
+                st.plotly_chart(fig, use_container_width=True)
     
     with tab4:
         st.subheader("📥 Download Results")
@@ -671,76 +667,59 @@ if st.session_state.processed and 'results' in st.session_state:
         if results['output1'].empty:
             st.info("Tidak ada data untuk didownload")
         else:
-            # Generate timestamp
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             
-            # Format selection
-            col_format1, col_format2 = st.columns(2)
-            with col_format1:
-                include_product_names = st.checkbox("Include Product Names", value=True)
-            with col_format2:
+            # Pilihan download
+            col_format, col_include = st.columns(2)
+            with col_format:
                 download_format = st.radio("Format", ["CSV", "Excel"], horizontal=True)
+            with col_include:
+                split_by_marketplace = st.checkbox("Split by Marketplace", value=True)
             
             st.divider()
             
-            # Prepare data berdasarkan pilihan
-            if include_product_names:
-                download_df1 = results['output1']
-                download_df2 = results['output2']
-            else:
-                # Hilangkan kolom Product Name
-                download_df1 = results['output1'].drop(columns=['Product Name'], errors='ignore')
-                download_df2 = results['output2'].drop(columns=['Product Name'], errors='ignore')
-            
             if download_format == "CSV":
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    # Download Output 1
-                    csv1 = download_df1.to_csv(index=False, encoding='utf-8-sig')
+                if split_by_marketplace:
+                    # Download per marketplace
+                    for mp in results['output1']['Marketplace'].unique():
+                        df_mp = results['output1'][results['output1']['Marketplace'] == mp]
+                        csv_data = df_mp.to_csv(index=False, encoding='utf-8-sig')
+                        
+                        st.download_button(
+                            label=f"📥 Download {mp} Orders",
+                            data=csv_data,
+                            file_name=f"{mp.lower()}_orders_{timestamp}.csv",
+                            mime="text/csv",
+                            width='stretch'
+                        )
+                else:
+                    # Download semua
+                    csv_all = results['output1'].to_csv(index=False, encoding='utf-8-sig')
                     st.download_button(
-                        label="📥 Detail Order",
-                        data=csv1,
-                        file_name=f"detail_order_{timestamp}.csv",
+                        label="📥 Download All Orders",
+                        data=csv_all,
+                        file_name=f"all_marketplaces_orders_{timestamp}.csv",
                         mime="text/csv",
                         width='stretch'
                     )
-                
-                with col2:
-                    # Download Output 2
-                    csv2 = download_df2.to_csv(index=False, encoding='utf-8-sig')
-                    st.download_button(
-                        label="📥 SKU Summary",
-                        data=csv2,
-                        file_name=f"sku_summary_{timestamp}.csv",
-                        mime="text/csv",
-                        width='stretch'
-                    )
-                
-                with col3:
-                    # Download Output 3
-                    csv3 = results['output3'].to_csv(index=False, encoding='utf-8-sig')
-                    st.download_button(
-                        label="📥 Courier Summary",
-                        data=csv3,
-                        file_name=f"courier_summary_{timestamp}.csv",
-                        mime="text/csv",
-                        width='stretch'
-                    )
-            else:  # Excel format
-                # Download All as Excel
+            else:
+                # Excel format
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    download_df1.to_excel(writer, sheet_name='Detail Order', index=False)
-                    download_df2.to_excel(writer, sheet_name='SKU Summary', index=False)
-                    results['output3'].to_excel(writer, sheet_name='Courier Summary', index=False)
-                    # Tambahkan sheet SKU Master sebagai reference
-                    results['sku_master'].to_excel(writer, sheet_name='SKU Master Ref', index=False)
+                    if split_by_marketplace:
+                        for mp in results['output1']['Marketplace'].unique():
+                            df_mp = results['output1'][results['output1']['Marketplace'] == mp]
+                            df_mp.to_excel(writer, sheet_name=f'{mp[:20]} Orders', index=False)
+                    else:
+                        results['output1'].to_excel(writer, sheet_name='All Orders', index=False)
+                    
+                    results['output2'].to_excel(writer, sheet_name='SKU Summary', index=False)
+                    results['output3'].to_excel(writer, sheet_name='Marketplace Summary', index=False)
                 
                 st.download_button(
                     label="📊 Download All (Excel)",
                     data=output.getvalue(),
-                    file_name=f"instant_sameday_report_{timestamp}.xlsx",
+                    file_name=f"universal_order_report_{timestamp}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     width='stretch'
                 )
@@ -751,18 +730,23 @@ else:
     
     with col1:
         st.info("""
-        ## 📋 Instruksi Cepat:
+        ## 🌐 Universal Order Processor
         
-        1. **Upload 2 file** di sidebar:
-           - **File Order** (CSV/Excel dari Shopee)
-           - **File Kamus Master** (Excel dengan 3 sheet)
+        **Support untuk:** Shopee, Tokopedia, TikTok
         
-        2. Klik **PROCESS DATA**
+        **Fitur:**
+        - ✅ Multi-marketplace processing
+        - ✅ Auto detect file format
+        - ✅ Bundle expansion
+        - ✅ Product name lookup
+        - ✅ Per marketplace summary
+        - ✅ Flexible filters
         
-        3. Lihat hasil & download
-        
-        ⚡ **Optimized:** Processing lebih cepat dengan batch operations
-        🔍 **Debug:** Fitur debugging untuk SKU yang tidak match
+        **Cara pakai:**
+        1. Pilih marketplace di sidebar
+        2. Upload file order untuk masing-masing marketplace
+        3. Upload file kamus master (Excel)
+        4. Klik PROCESS ALL DATA
         """)
     
     with col2:
@@ -770,4 +754,4 @@ else:
 
 # Footer
 st.divider()
-st.caption("💡 **Tip:** Jika SKU tidak match, cek format teks, spasi, atau karakter khusus di file Kamus Master")
+st.caption("🌐 **Universal Processor** - Satu dashboard untuk semua marketplace")
