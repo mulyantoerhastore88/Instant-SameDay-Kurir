@@ -92,7 +92,7 @@ if order_file and kamus_file:
         order_df = order_df[
             (order_df["Status Pesanan"] == "Perlu Dikirim") &
             (order_df["Pesanan yang Dikelola Shopee"] == "No") &
-            (order_df["No Resi"].isna()) &
+            (order_df["No. Resi"].isna()) &
             (order_df["Opsi Pengiriman"].isin(["Instant", "Same Day"]))
         ]
 
