@@ -95,7 +95,7 @@ def standardize_tokped_data(df):
         'Tracking ID': 'tracking_id',
         'Kurir': 'shipping_option',
         'Pengiriman': 'shipping_option',
-        'Delivery Option': 'shipping_option'
+        'Delivery Option': 'shipping_option' # <-- UPDATE PENTING: Handle nama kolom baru
     }
     df = df.rename(columns=col_map)
     df['marketplace'] = 'Tokopedia'
@@ -107,7 +107,7 @@ def standardize_tokped_data(df):
     else:
         df['tracking_id'] = ''
 
-    # Pastikan shipping_option ada
+    # Safety: Pastikan shipping_option ada
     if 'shipping_option' not in df.columns:
         df['shipping_option'] = ''
         
@@ -148,17 +148,15 @@ def process_data(uploaded_files, kamus_data):
     if 'SKU Bundle' in df_bundle.columns:
         df_bundle['SKU Bundle'] = df_bundle['SKU Bundle'].apply(clean_sku)
     
-    # --- REVISI LOGIC LOOKUP SKU MASTER ---
-    # Target: Kolom B (Kode) dan Kolom C (Nama)
-    # Dalam Pandas (0-indexed): Kolom A=0, B=1, C=2
+    # --- LOGIC LOOKUP SKU MASTER (KOLOM B & KOLOM C) ---
     try:
         if len(df_sku.columns) >= 3:
-            # Ambil Kolom Index 1 (B) dan Index 2 (C)
+            # Pandas 0-index: A=0, B=1, C=2
             df_sku_subset = df_sku.iloc[:, [1, 2]].copy()
             df_sku_subset.columns = ['SKU Component', 'Product Name Master']
         else:
-            # Fallback jika kolom kurang (misal cuma ada A dan B)
-            st.warning("⚠️ Format SKU Master tidak standar (Kurang dari 3 kolom). Mencoba ambil kolom 1 & 2.")
+            # Fallback jika kolom kurang
+            st.warning("⚠️ Format SKU Master tidak standar. Mencoba ambil kolom 1 & 2.")
             df_sku_subset = df_sku.iloc[:, [0, 1]].copy()
             df_sku_subset.columns = ['SKU Component', 'Product Name Master']
             
@@ -186,10 +184,14 @@ def process_data(uploaded_files, kamus_data):
             else:
                 df_raw = pd.read_excel(file_obj, dtype=str)
             
-            # Buang header sampah (ciri khas export Tokped/TikTok terbaru)
+            # --- CLEANING HEADER SAMPAH ---
+            # Jika baris pertama berisi deskripsi (ciri khas export Tokped/TikTok baru)
+            # Contoh: "Platform unique order ID."
             if len(df_raw) > 0 and str(df_raw.iloc[0, 0]).startswith('Platform unique'):
                 df_raw = df_raw.iloc[1:].reset_index(drop=True)
-
+                # Set ulang header jika perlu (biasanya read_csv sudah handle, tapi ini safety net)
+                # Namun untuk kasus ini, biasanya row 0 jadi data header yg benar setelah skip
+                
         except Exception as e:
             st.error(f"Gagal membaca file {file_obj.name}: {e}")
             continue
@@ -207,7 +209,7 @@ def process_data(uploaded_files, kamus_data):
             
         elif mp_type == 'Tokopedia':
             df_std = standardize_tokped_data(df_raw)
-            # Filter Tokped (Resi Kosong)
+            # Filter Tokped (Safety: Tracking Kosong)
             df_filtered = df_std[
                 ((df_std['tracking_id'].isna()) | (df_std['tracking_id'] == '') | (df_std['tracking_id'] == 'nan'))
             ].copy()
@@ -274,19 +276,18 @@ def process_data(uploaded_files, kamus_data):
 
     df_result = pd.DataFrame(all_expanded_rows)
     
-    # --- 4. LOOKUP PRODUCT NAMES (FIXED LOGIC) ---
-    
-    # Merge Component Name (Lookup ke SKU Master B & C)
+    # --- 4. LOOKUP PRODUCT NAMES ---
+    # Merge Component Name
     df_result = pd.merge(
         df_result, 
-        df_sku_subset, # Pakai subset B&C yg sudah dibuat diatas
+        df_sku_subset, 
         on='SKU Component', 
         how='left'
     )
     df_result = df_result.rename(columns={'Product Name Master': 'Component Name'})
     df_result['Component Name'] = df_result['Component Name'].fillna(df_result['SKU Component'])
     
-    # Merge Original Product Name (Optional, buat info aja)
+    # Merge Original Product Name
     df_result = pd.merge(
         df_result,
         df_sku_subset,
@@ -296,7 +297,6 @@ def process_data(uploaded_files, kamus_data):
         suffixes=('', '_orig')
     )
     df_result = df_result.rename(columns={'Product Name Master': 'Product Name Original'})
-    # Bersihkan kolom hasil merge sisa
     if 'SKU Component_orig' in df_result.columns:
         df_result.drop(columns=['SKU Component_orig'], inplace=True)
 
@@ -355,6 +355,7 @@ if st.sidebar.button("🚀 PROSES DATA", type="primary", use_container_width=Tru
     else:
         with st.spinner("Sedang memproses..."):
             try:
+                # Load Kamus
                 excel_kamus = pd.ExcelFile(kamus_file)
                 kamus_dict = {
                     'kurir': pd.read_excel(kamus_file, sheet_name='Kurir-Shopee'),
@@ -373,7 +374,7 @@ if st.sidebar.button("🚀 PROSES DATA", type="primary", use_container_width=Tru
                     
             except Exception as e:
                 st.error(f"Terjadi kesalahan: {e}")
-                # st.exception(e) 
+                # st.exception(e)
 
 # ==========================================
 # 4. DISPLAY RESULTS
