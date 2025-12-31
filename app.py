@@ -75,41 +75,27 @@ def standardize_shopee_data(df):
     return df
 
 def standardize_tokped_data(df):
-    """Mapping kolom Tokopedia (Updated untuk Support Format Baru/BigSeller)"""
+    """Mapping kolom Tokopedia (Updated Sesuai File Upload User)"""
     df.columns = df.columns.str.strip()
     
     col_map = {
-        'Nomor Invoice': 'order_id',
-        'Order ID': 'order_id',
-        'Status Pesanan': 'status',
-        'Order Status': 'status',
-        'Nomor SKU': 'sku_reference',
-        'SKU': 'sku_reference', 
-        'Seller SKU': 'sku_reference',
-        'Nama Produk': 'product_name_raw',
-        'Product Name': 'product_name_raw',
-        'Jumlah Produk': 'quantity',
-        'Quantity': 'quantity',
-        'No. Resi / Kode Booking': 'tracking_id',
-        'No. Resi': 'tracking_id',
-        'Tracking ID': 'tracking_id',
-        'Kurir': 'shipping_option',
-        'Pengiriman': 'shipping_option',
-        'Delivery Option': 'shipping_option' # <-- UPDATE PENTING: Handle nama kolom baru
+        'Order ID': 'order_id',          # Kolom A
+        'Order Status': 'status',        # Kolom B
+        'Seller SKU': 'sku_reference',   # Kolom G
+        'Product Name': 'product_name_raw', # Kolom H
+        'Quantity': 'quantity',          # Kolom J
+        'Delivery Option': 'shipping_option', # Kolom AM
+        'Tracking ID': 'tracking_id'     # Kolom AL
     }
+    
+    # Rename kolom yang ditemukan
     df = df.rename(columns=col_map)
     df['marketplace'] = 'Tokopedia'
-    df['managed_by_platform'] = 'No'
     
-    # Normalisasi Tracking ID
-    if 'tracking_id' in df.columns:
-        df['tracking_id'] = df['tracking_id'].astype(str).replace({'-': '', 'nan': '', 'None': '', 'NaT': ''})
-    else:
-        df['tracking_id'] = ''
-
-    # Safety: Pastikan shipping_option ada
-    if 'shipping_option' not in df.columns:
-        df['shipping_option'] = ''
+    # Default columns jika tidak ada di file
+    if 'managed_by_platform' not in df.columns: df['managed_by_platform'] = 'No'
+    if 'tracking_id' not in df.columns: df['tracking_id'] = ''
+    if 'shipping_option' not in df.columns: df['shipping_option'] = '' # Safety net
         
     return df
 
@@ -145,28 +131,26 @@ def process_data(uploaded_files, kamus_data):
     df_bundle = clean_df_strings(kamus_data['bundle'])
     df_sku = clean_df_strings(kamus_data['sku'])
     
+    # Clean SKU Bundle di Kamus
     if 'SKU Bundle' in df_bundle.columns:
         df_bundle['SKU Bundle'] = df_bundle['SKU Bundle'].apply(clean_sku)
     
-    # --- LOGIC LOOKUP SKU MASTER (KOLOM B & KOLOM C) ---
+    # --- PREPARE SKU MASTER LOOKUP ---
     try:
+        # Ambil Kolom B (Kode) dan C (Nama) -> Index 1 dan 2
         if len(df_sku.columns) >= 3:
-            # Pandas 0-index: A=0, B=1, C=2
             df_sku_subset = df_sku.iloc[:, [1, 2]].copy()
             df_sku_subset.columns = ['SKU Component', 'Product Name Master']
         else:
-            # Fallback jika kolom kurang
-            st.warning("⚠️ Format SKU Master tidak standar. Mencoba ambil kolom 1 & 2.")
+            # Fallback
             df_sku_subset = df_sku.iloc[:, [0, 1]].copy()
             df_sku_subset.columns = ['SKU Component', 'Product Name Master']
             
         df_sku_subset['SKU Component'] = df_sku_subset['SKU Component'].apply(clean_sku)
-        
     except Exception as e:
-        return {'error': f"❌ Gagal memproses Sheet SKU Master. Pastikan ada Kolom B (Kode) dan C (Nama). Error: {e}"}
+        return {'error': f"❌ Error memproses SKU Master: {e}"}
 
-    
-    # Get Instant Couriers List
+    # Prepare Shopee Instant List
     instant_options = []
     if 'Instant/Same Day' in df_kurir.columns:
         kurir_col = df_kurir.columns[0]
@@ -184,22 +168,24 @@ def process_data(uploaded_files, kamus_data):
             else:
                 df_raw = pd.read_excel(file_obj, dtype=str)
             
-            # --- CLEANING HEADER SAMPAH ---
-            # Jika baris pertama berisi deskripsi (ciri khas export Tokped/TikTok baru)
-            # Contoh: "Platform unique order ID."
-            if len(df_raw) > 0 and str(df_raw.iloc[0, 0]).startswith('Platform unique'):
-                df_raw = df_raw.iloc[1:].reset_index(drop=True)
-                # Set ulang header jika perlu (biasanya read_csv sudah handle, tapi ini safety net)
-                # Namun untuk kasus ini, biasanya row 0 jadi data header yg benar setelah skip
-                
+            # --- MEMBERSIHKAN HEADER SAMPAH (KHUSUS FORMAT BARU) ---
+            # Jika baris pertama (index 0) adalah deskripsi (cth: "Platform unique order ID."), buang.
+            if len(df_raw) > 0:
+                first_cell = str(df_raw.iloc[0, 0])
+                if first_cell.startswith('Platform unique') or first_cell.startswith('Order ID'):
+                    # Kadang header ada di baris 0, deskripsi baris 1. 
+                    # Tapi pandas baca header row 0. Jadi row 0 data adalah deskripsi.
+                    if first_cell.startswith('Platform unique'):
+                        df_raw = df_raw.iloc[1:].reset_index(drop=True)
+
         except Exception as e:
             st.error(f"Gagal membaca file {file_obj.name}: {e}")
             continue
             
-        # Standardize based on Marketplace
+        # --- STANDARDIZE & FILTER ---
         if mp_type == 'Shopee':
             df_std = standardize_shopee_data(df_raw)
-            # Filter Shopee
+            # Filter Shopee (Kompleks: Instant + No Managed + No Resi)
             df_filtered = df_std[
                 (df_std['status'].str.upper() == 'PERLU DIKIRIM') &
                 (df_std['managed_by_platform'].str.upper().isin(['NO', 'TIDAK'])) &
@@ -209,9 +195,10 @@ def process_data(uploaded_files, kamus_data):
             
         elif mp_type == 'Tokopedia':
             df_std = standardize_tokped_data(df_raw)
-            # Filter Tokped (Safety: Tracking Kosong)
+            # Filter Tokopedia (SIMPLE: Hanya Status 'Perlu dikirim')
+            # Kita pakai str.lower() biar aman dari case sensitive
             df_filtered = df_std[
-                ((df_std['tracking_id'].isna()) | (df_std['tracking_id'] == '') | (df_std['tracking_id'] == 'nan'))
+                (df_std['status'].astype(str).str.strip().str.lower() == 'perlu dikirim')
             ].copy()
             
         elif mp_type == 'TikTok':
@@ -235,14 +222,13 @@ def process_data(uploaded_files, kamus_data):
             qty_order = row['quantity']
             
             if sku_key in bundle_skus:
-                # EXPAND BUNDLE
+                # IS BUNDLE -> EXPAND
                 components = df_bundle[df_bundle['SKU Bundle'] == sku_key]
                 for _, comp in components.iterrows():
-                    # Handle nama kolom qty yang variatif
+                    # Cari kolom qty & sku component di kamus (flexible name)
                     comp_qty_col = [c for c in df_bundle.columns if 'quantity' in c.lower() or 'jumlah' in c.lower()]
                     comp_qty = float(comp[comp_qty_col[0]]) if comp_qty_col else 1
                     
-                    # Handle nama kolom component
                     comp_sku_col = [c for c in df_bundle.columns if 'component' in c.lower() or 'komponen' in c.lower()]
                     comp_sku = clean_sku(comp[comp_sku_col[0]]) if comp_sku_col else ""
 
@@ -258,7 +244,7 @@ def process_data(uploaded_files, kamus_data):
                         'Total Qty': qty_order * comp_qty
                     })
             else:
-                # SINGLE ITEM
+                # SINGLE ITEM -> PASS THROUGH
                 all_expanded_rows.append({
                     'Marketplace': row['marketplace'],
                     'Order ID': row['order_id'],
@@ -272,7 +258,7 @@ def process_data(uploaded_files, kamus_data):
                 })
 
     if not all_expanded_rows:
-        return {'error': '❌ Tidak ada data yang memenuhi kriteria filter (Resi Kosong & Instant/Priority).'}
+        return {'error': '❌ Tidak ada data yang memenuhi kriteria filter.'}
 
     df_result = pd.DataFrame(all_expanded_rows)
     
@@ -287,7 +273,7 @@ def process_data(uploaded_files, kamus_data):
     df_result = df_result.rename(columns={'Product Name Master': 'Component Name'})
     df_result['Component Name'] = df_result['Component Name'].fillna(df_result['SKU Component'])
     
-    # Merge Original Product Name
+    # Merge Original Product Name (Info only)
     df_result = pd.merge(
         df_result,
         df_sku_subset,
@@ -355,7 +341,6 @@ if st.sidebar.button("🚀 PROSES DATA", type="primary", use_container_width=Tru
     else:
         with st.spinner("Sedang memproses..."):
             try:
-                # Load Kamus
                 excel_kamus = pd.ExcelFile(kamus_file)
                 kamus_dict = {
                     'kurir': pd.read_excel(kamus_file, sheet_name='Kurir-Shopee'),
@@ -384,8 +369,8 @@ if st.session_state.processed and 'results' in st.session_state:
     res = st.session_state.results
     
     c1, c2, c3 = st.columns(3)
-    c1.metric("Total Order (Resi Blank)", res['total_orders'])
-    c2.metric("Total Baris Item", res['total_items'])
+    c1.metric("Total Order", res['total_orders'])
+    c2.metric("Total Item", res['total_items'])
     c3.metric("Waktu Proses", f"{res['time']:.2f} detik")
     
     st.divider()
