@@ -21,6 +21,8 @@ if 'processed' not in st.session_state:
     st.session_state.processed = False
 if 'results' not in st.session_state:
     st.session_state.results = {}
+if 'debug_info' not in st.session_state:
+    st.session_state.debug_info = {}
 
 # --- FUNGSI SIMPLE CLEANING ---
 def clean_sku(sku):
@@ -82,12 +84,23 @@ def read_kamus_file(kamus_file):
             excel_file = pd.ExcelFile(kamus_file, engine='openpyxl')
             sheet_names = excel_file.sheet_names
             
+            # Tampilkan sheet names untuk debug
+            st.sidebar.write(f"📑 Sheet names in kamus: {sheet_names}")
+            
             # Baca 3 sheet pertama (Kurir, Bundle, SKU Master)
             df_kurir = pd.read_excel(kamus_file, sheet_name=0, engine='openpyxl')
             df_bundle = pd.read_excel(kamus_file, sheet_name=1, engine='openpyxl')
             df_sku = pd.read_excel(kamus_file, sheet_name=2, engine='openpyxl')
             
             st.sidebar.success(f"✅ Kamus: {len(sheet_names)} sheet terbaca")
+            
+            # Debug info
+            st.session_state.debug_info['kamus_sheets'] = sheet_names
+            st.session_state.debug_info['kamus_shape'] = {
+                'kurir': df_kurir.shape,
+                'bundle': df_bundle.shape,
+                'sku': df_sku.shape
+            }
             
             return {
                 'kurir': df_kurir,
@@ -98,10 +111,87 @@ def read_kamus_file(kamus_file):
         st.error(f"Error baca file kamus: {str(e)}")
         return None
 
+# --- FUNGSI BACA FILE TOKPED DENGAN DEBUG ---
+def read_tokped_file_debug(tokped_file):
+    """Baca file Tokped dengan debugging info"""
+    try:
+        if tokped_file.name.endswith('.csv'):
+            df = pd.read_csv(tokped_file)
+            st.sidebar.success(f"✅ Tokped: CSV file, {df.shape[0]} rows, {df.shape[1]} columns")
+            st.session_state.debug_info['tokped_file_type'] = 'CSV'
+            st.session_state.debug_info['tokped_shape'] = df.shape
+            st.session_state.debug_info['tokped_columns'] = list(df.columns)[:10]
+            return df
+        else:
+            # Untuk Excel, coba baca dengan debugging
+            excel_file = pd.ExcelFile(tokped_file, engine='openpyxl')
+            sheet_names = excel_file.sheet_names
+            
+            # Debug info
+            st.session_state.debug_info['tokped_sheets'] = sheet_names
+            st.session_state.debug_info['tokped_file_type'] = 'Excel'
+            
+            st.sidebar.write(f"📑 Sheet names in Tokped: {sheet_names}")
+            
+            # Coba baca sheet pertama untuk preview
+            df_preview = pd.read_excel(tokped_file, sheet_name=0, nrows=5, engine='openpyxl')
+            st.sidebar.write(f"🔍 Preview kolom sheet pertama: {list(df_preview.columns)[:10]}")
+            
+            # Coba baca semua data dari sheet pertama
+            df = pd.read_excel(tokped_file, sheet_name=0, engine='openpyxl')
+            st.sidebar.success(f"✅ Tokped: Sheet '{sheet_names[0]}', {df.shape[0]} rows, {df.shape[1]} columns")
+            
+            # Debug info
+            st.session_state.debug_info['tokped_shape'] = df.shape
+            st.session_state.debug_info['tokped_columns'] = list(df.columns)[:10]
+            st.session_state.debug_info['tokped_first_rows'] = df.head(3).to_dict('records')
+            
+            return df
+            
+    except Exception as e:
+        st.error(f"Error membaca file Tokped: {str(e)}")
+        st.session_state.debug_info['tokped_error'] = str(e)
+        return None
+
+# --- FUNGSI BACA FILE SHOPEE DENGAN DEBUG ---
+def read_shopee_file_debug(shopee_file):
+    """Baca file Shopee dengan debugging info"""
+    try:
+        if shopee_file.name.endswith('.csv'):
+            df = pd.read_csv(shopee_file)
+            st.sidebar.success(f"✅ Shopee: CSV file, {df.shape[0]} rows, {df.shape[1]} columns")
+            st.session_state.debug_info['shopee_file_type'] = 'CSV'
+            st.session_state.debug_info['shopee_shape'] = df.shape
+            return df
+        else:
+            # Untuk Excel
+            excel_file = pd.ExcelFile(shopee_file, engine='openpyxl')
+            sheet_names = excel_file.sheet_names
+            
+            st.session_state.debug_info['shopee_sheets'] = sheet_names
+            st.session_state.debug_info['shopee_file_type'] = 'Excel'
+            
+            # Baca sheet pertama
+            df = pd.read_excel(shopee_file, sheet_name=0, engine='openpyxl')
+            st.sidebar.success(f"✅ Shopee: Sheet '{sheet_names[0]}', {df.shape[0]} rows, {df.shape[1]} columns")
+            
+            st.session_state.debug_info['shopee_shape'] = df.shape
+            st.session_state.debug_info['shopee_columns'] = list(df.columns)[:10]
+            
+            return df
+            
+    except Exception as e:
+        st.error(f"Error membaca file Shopee: {str(e)}")
+        st.session_state.debug_info['shopee_error'] = str(e)
+        return None
+
 # --- FUNGSI PROCESS SHOPEE ---
 def process_shopee(df_shopee, kamus_data, sku_mapping):
     """Proses data Shopee dengan filter"""
     expanded_rows = []
+    
+    if df_shopee is None or df_shopee.empty:
+        return expanded_rows
     
     # Ambil data dari kamus
     df_kurir = kamus_data['kurir']
@@ -138,74 +228,60 @@ def process_shopee(df_shopee, kamus_data, sku_mapping):
     df_shopee.columns = [str(col).strip() for col in df_shopee.columns]
     
     # Debug: tampilkan kolom yang ada
-    st.sidebar.write(f"📦 Kolom Shopee: {list(df_shopee.columns)[:10]}...")
+    st.sidebar.write(f"📦 Kolom Shopee: {list(df_shopee.columns)[:10]}")
     
-    # Rename columns jika perlu - FLEKSIBEL
-    column_mappings = [
-        # Format 1
-        {
-            'No. Pesanan': 'order_id',
-            'Status Pesanan': 'status', 
-            'Pesanan yang Dikelola Shopee': 'managed_shopee',
-            'Opsi Pengiriman': 'shipping',
-            'No. Resi': 'resi',
-            'Nomor Referensi SKU': 'sku_reference',
-            'SKU Induk': 'sku_induk', 
-            'Nama Produk': 'product_name',
-            'Jumlah': 'quantity'
-        },
-        # Format 2 (alternatif)
-        {
-            'No Pesanan': 'order_id',
-            'Status': 'status',
-            'Dikelola Shopee': 'managed_shopee',
-            'Pengiriman': 'shipping',
-            'Resi': 'resi',
-            'SKU': 'sku_reference',
-            'Qty': 'quantity'
-        }
-    ]
+    # Cari kolom yang diperlukan
+    order_id_col = None
+    status_col = None
+    sku_col = None
+    qty_col = None
     
-    # Coba mapping
-    df_shopee_clean = df_shopee.copy()
-    for mapping in column_mappings:
-        for old_col, new_col in mapping.items():
-            if old_col in df_shopee_clean.columns:
-                df_shopee_clean.rename(columns={old_col: new_col}, inplace=True)
+    for col in df_shopee.columns:
+        col_lower = col.lower()
+        if 'pesanan' in col_lower and ('no' in col_lower or 'id' in col_lower):
+            order_id_col = col
+        elif 'status' in col_lower:
+            status_col = col
+        elif 'sku' in col_lower or 'referensi' in col_lower:
+            sku_col = col
+        elif 'jumlah' in col_lower or 'qty' in col_lower:
+            qty_col = col
     
-    # Pastikan kolom required ada
-    required_cols = ['order_id', 'sku_reference', 'quantity']
-    for col in required_cols:
-        if col not in df_shopee_clean.columns:
-            # Cari kolom yang mirip
-            for actual_col in df_shopee_clean.columns:
-                if col in actual_col.lower():
-                    df_shopee_clean.rename(columns={actual_col: col}, inplace=True)
-                    break
+    st.sidebar.write(f"🔍 Shopee cols found: order={order_id_col}, sku={sku_col}, qty={qty_col}")
+    
+    # Jika tidak ketemu, gunakan default
+    if not order_id_col and len(df_shopee.columns) > 0:
+        order_id_col = df_shopee.columns[0]
+    
+    if not sku_col and len(df_shopee.columns) > 1:
+        sku_col = df_shopee.columns[1]
+    
+    if not qty_col and len(df_shopee.columns) > 2:
+        qty_col = df_shopee.columns[2]
     
     # Filter untuk Shopee: Perlu Dikirim + No Resi + Instant Kurir
-    df_filtered = df_shopee_clean.copy()
+    df_filtered = df_shopee.copy()
     
     # Filter status jika ada
-    if 'status' in df_filtered.columns:
+    if status_col:
         df_filtered = df_filtered[
-            df_filtered['status'].astype(str).str.upper().str.contains('PERLU DIKIRIM')
+            df_filtered[status_col].astype(str).str.upper().str.contains('PERLU DIKIRIM')
         ]
-    
-    # Filter managed by shopee jika ada
-    if 'managed_shopee' in df_filtered.columns:
-        df_filtered = df_filtered[
-            df_filtered['managed_shopee'].astype(str).str.upper().str.contains('NO')
-        ]
+        st.sidebar.info(f"Filter status: {len(df_filtered)} rows left")
     
     # Filter no resi jika ada
-    if 'resi' in df_filtered.columns:
+    resi_cols = [col for col in df_filtered.columns if 'resi' in col.lower()]
+    if resi_cols:
+        resi_col = resi_cols[0]
         df_filtered = df_filtered[
-            df_filtered['resi'].isna() | (df_filtered['resi'].astype(str).str.strip() == '')
+            df_filtered[resi_col].isna() | (df_filtered[resi_col].astype(str).str.strip() == '')
         ]
+        st.sidebar.info(f"Filter no resi: {len(df_filtered)} rows left")
     
     # Filter instant kurir jika ada
-    if 'shipping' in df_filtered.columns:
+    shipping_cols = [col for col in df_filtered.columns if 'pengiriman' in col.lower() or 'shipping' in col.lower()]
+    if shipping_cols:
+        shipping_col = shipping_cols[0]
         # Get instant/same day kurir
         df_kurir['Opsi Pengiriman'] = df_kurir.iloc[:, 0].astype(str).str.strip()
         df_kurir['Instant/Same Day'] = df_kurir.iloc[:, 1].astype(str).str.strip()
@@ -214,70 +290,75 @@ def process_shopee(df_shopee, kamus_data, sku_mapping):
             df_kurir['Instant/Same Day'].str.upper().str.contains('YES')
         ]['Opsi Pengiriman'].unique()
         
-        df_filtered = df_filtered[df_filtered['shipping'].isin(instant_kurir)]
+        df_filtered = df_filtered[df_filtered[shipping_col].isin(instant_kurir)]
+        st.sidebar.info(f"Filter instant kurir: {len(df_filtered)} rows left")
     
     if df_filtered.empty:
         st.sidebar.warning("⚠️ Tidak ada data Shopee setelah filter")
         return expanded_rows
     
     # Process each row
+    processed_count = 0
     for _, row in df_filtered.iterrows():
-        # Cari SKU dari berbagai kolom
-        sku_candidates = []
+        # Ambil SKU
+        sku_value = ""
+        if sku_col and sku_col in row and pd.notna(row[sku_col]):
+            sku_value = str(row[sku_col])
         
-        # Prioritaskan kolom SKU
-        sku_cols = [col for col in df_filtered.columns if 'sku' in col.lower()]
-        for col in sku_cols:
-            if col in row and pd.notna(row[col]) and str(row[col]).strip():
-                sku_candidates.append(str(row[col]))
-        
-        # Jika tidak ada, coba product name
-        if not sku_candidates and 'product_name' in row:
-            sku_candidates.append(str(row['product_name']))
-        
-        sku_awal = ''
-        for candidate in sku_candidates:
-            cleaned = clean_sku(candidate)
-            if cleaned:
-                sku_awal = cleaned
-                break
+        sku_awal = clean_sku(sku_value)
         
         if not sku_awal:
             continue
             
-        qty = float(row['quantity']) if 'quantity' in row and pd.notna(row['quantity']) else 1.0
+        # Ambil quantity
+        qty = 1.0
+        if qty_col and qty_col in row and pd.notna(row[qty_col]):
+            try:
+                qty = float(row[qty_col])
+            except:
+                qty = 1.0
+        
+        # Ambil order ID
+        order_id = ""
+        if order_id_col and order_id_col in row and pd.notna(row[order_id_col]):
+            order_id = str(row[order_id_col])
         
         if sku_awal in bundle_mapping:
             # Bundle
             for component_sku, comp_qty in bundle_mapping[sku_awal]:
                 expanded_rows.append({
                     'Marketplace': 'Shopee',
-                    'Order ID': str(row.get('order_id', '')),
+                    'Order ID': order_id,
                     'Original SKU': sku_awal,
                     'Is Bundle': 'Yes',
                     'SKU Component': component_sku,
                     'Product Name': sku_mapping.get(component_sku, ''),
                     'Quantity': qty * comp_qty
                 })
+                processed_count += 1
         else:
             # Single
             expanded_rows.append({
                 'Marketplace': 'Shopee',
-                'Order ID': str(row.get('order_id', '')),
+                'Order ID': order_id,
                 'Original SKU': sku_awal,
                 'Is Bundle': 'No',
                 'SKU Component': sku_awal,
                 'Product Name': sku_mapping.get(sku_awal, ''),
                 'Quantity': qty
             })
+            processed_count += 1
     
-    st.sidebar.info(f"✅ Shopee: {len(expanded_rows)} items processed")
+    st.sidebar.success(f"✅ Shopee: {processed_count} items processed")
     return expanded_rows
 
 # --- FUNGSI PROCESS TOKPED ---
 def process_tokped(df_tokped, kamus_data, sku_mapping):
     """Proses data Tokopedia/TikTok TANPA FILTER"""
     expanded_rows = []
+    
+    if df_tokped is None or df_tokped.empty:
+        return expanded_rows
     
     # Ambil bundle data dari kamus
     df_bundle = kamus_data['bundle']
@@ -313,98 +394,98 @@ def process_tokped(df_tokped, kamus_data, sku_mapping):
     df_tokped.columns = [str(col).strip() for col in df_tokped.columns]
     
     # Debug: tampilkan kolom yang ada
-    st.sidebar.write(f"🛍️ Kolom Tokped: {list(df_tokped.columns)[:10]}...")
+    st.sidebar.write(f"🛍️ Kolom Tokped: {list(df_tokped.columns)[:10]}")
     
-    # Cari kolom yang dibutuhkan dengan FLEKSIBEL
-    df_tokped_clean = df_tokped.copy()
+    # Cari kolom yang diperlukan
+    order_id_col = None
+    sku_col = None
+    qty_col = None
     
-    # Mapping untuk Tokped
-    tokped_mappings = [
-        # Format lengkap
-        {
-            'Order ID': 'order_id',
-            'Seller SKU': 'sku_reference', 
-            'Quantity': 'quantity',
-            'Tracking ID': 'tracking_id'
-        },
-        # Format alternatif
-        {
-            'OrderID': 'order_id',
-            'SKU': 'sku_reference',
-            'Qty': 'quantity',
-            'Tracking': 'tracking_id'
-        }
-    ]
+    # Pertama, cari dengan pattern yang spesifik
+    for col in df_tokped.columns:
+        col_lower = col.lower()
+        if 'order' in col_lower and 'id' in col_lower:
+            order_id_col = col
+        elif 'seller' in col_lower and 'sku' in col_lower:
+            sku_col = col
+        elif 'quantity' in col_lower and 'sku' not in col_lower:  # Hindari "Sku Quantity of return"
+            qty_col = col
     
-    # Coba mapping
-    for mapping in tokped_mappings:
-        for old_col, new_col in mapping.items():
-            if old_col in df_tokped_clean.columns:
-                df_tokped_clean.rename(columns={old_col: new_col}, inplace=True)
-    
-    # Jika belum ketemu, cari dengan contains
-    if 'order_id' not in df_tokped_clean.columns:
-        for col in df_tokped_clean.columns:
-            if 'order' in col.lower() and 'id' in col.lower():
-                df_tokped_clean.rename(columns={col: 'order_id'}, inplace=True)
-                break
-    
-    if 'sku_reference' not in df_tokped_clean.columns:
-        for col in df_tokped_clean.columns:
+    # Jika tidak ketemu, cari alternatif
+    if not sku_col:
+        for col in df_tokped.columns:
             if 'sku' in col.lower():
-                df_tokped_clean.rename(columns={col: 'sku_reference'}, inplace=True)
+                sku_col = col
                 break
     
-    if 'quantity' not in df_tokped_clean.columns:
-        for col in df_tokped_clean.columns:
-            if 'quantity' in col.lower() or 'qty' in col.lower():
-                df_tokped_clean.rename(columns={col: 'quantity'}, inplace=True)
+    if not qty_col:
+        for col in df_tokped.columns:
+            if 'qty' in col.lower():
+                qty_col = col
                 break
     
-    # Pastikan kolom required ada
-    if 'order_id' not in df_tokped_clean.columns:
-        df_tokped_clean['order_id'] = range(1, len(df_tokped_clean) + 1)
+    st.sidebar.write(f"🔍 Tokped cols found: order={order_id_col}, sku={sku_col}, qty={qty_col}")
     
-    if 'sku_reference' not in df_tokped_clean.columns:
-        df_tokped_clean['sku_reference'] = ''
+    # Jika tidak ada kolom yang diperlukan, gunakan default
+    if not order_id_col and len(df_tokped.columns) > 0:
+        order_id_col = df_tokped.columns[0]
+        st.sidebar.warning(f"⚠️ Order ID col not found, using: {order_id_col}")
     
-    if 'quantity' not in df_tokped_clean.columns:
-        df_tokped_clean['quantity'] = 1
+    if not sku_col and len(df_tokped.columns) > 1:
+        sku_col = df_tokped.columns[1]
+        st.sidebar.warning(f"⚠️ SKU col not found, using: {sku_col}")
+    
+    if not qty_col and len(df_tokped.columns) > 2:
+        qty_col = df_tokped.columns[2]
+        st.sidebar.warning(f"⚠️ Quantity col not found, using: {qty_col}")
     
     # **PENTING: TIDAK ADA FILTER UNTUK TOKPED**
     # Langsung proses semua data karena sudah difilter dari MP
-    df_filtered = df_tokped_clean
+    df_filtered = df_tokped
     
-    st.sidebar.info(f"📊 Tokped: Processing {len(df_filtered)} rows (no filter)")
+    st.sidebar.info(f"📊 Tokped: Processing ALL {len(df_filtered)} rows (no filter)")
     
     # Process each row
     processed_count = 0
-    for _, row in df_filtered.iterrows():
-        sku_awal = clean_sku(str(row.get('sku_reference', '')))
+    for idx, row in df_filtered.iterrows():
+        # Ambil SKU
+        sku_value = ""
+        if sku_col and sku_col in row and pd.notna(row[sku_col]):
+            sku_value = str(row[sku_col])
+        
+        sku_awal = clean_sku(sku_value)
         
         if not sku_awal:
-            # Coba cari SKU dari kolom lain
+            # Coba kolom lain untuk SKU (cari yang bukan ID atau quantity)
             for col in df_filtered.columns:
-                if col not in ['order_id', 'quantity'] and pd.notna(row[col]):
+                if col != order_id_col and col != qty_col and pd.notna(row[col]):
                     cleaned = clean_sku(str(row[col]))
-                    if cleaned:
+                    if cleaned and len(cleaned) > 1:  # Minimal 2 karakter
                         sku_awal = cleaned
                         break
         
         if not sku_awal:
             continue
             
-        try:
-            qty = float(row['quantity']) if pd.notna(row['quantity']) else 1.0
-        except:
-            qty = 1.0
+        # Ambil quantity
+        qty = 1.0
+        if qty_col and qty_col in row and pd.notna(row[qty_col]):
+            try:
+                qty = float(row[qty_col])
+            except:
+                qty = 1.0
+        
+        # Ambil order ID
+        order_id = f"TOKPED_{idx+1}"  # Default jika tidak ada
+        if order_id_col and order_id_col in row and pd.notna(row[order_id_col]):
+            order_id = str(row[order_id_col])
         
         if sku_awal in bundle_mapping:
             # Bundle
             for component_sku, comp_qty in bundle_mapping[sku_awal]:
                 expanded_rows.append({
                     'Marketplace': 'Tokopedia/TikTok',
-                    'Order ID': str(row.get('order_id', '')),
+                    'Order ID': order_id,
                     'Original SKU': sku_awal,
                     'Is Bundle': 'Yes',
                     'SKU Component': component_sku,
@@ -416,7 +497,7 @@ def process_tokped(df_tokped, kamus_data, sku_mapping):
             # Single
             expanded_rows.append({
                 'Marketplace': 'Tokopedia/TikTok',
-                'Order ID': str(row.get('order_id', '')),
+                'Order ID': order_id,
                 'Original SKU': sku_awal,
                 'Is Bundle': 'No',
                 'SKU Component': sku_awal,
@@ -434,48 +515,69 @@ def process_all_data(shopee_file, tokped_file, kamus_data):
     start_time = time.time()
     all_expanded_rows = []
     
+    # Clear debug info sebelumnya
+    st.session_state.debug_info = {}
+    
     # Buat SKU mapping dari kamus
     sku_mapping = create_sku_mapping(kamus_data['sku'])
     
     # Proses Shopee jika ada
     if shopee_file is not None:
         try:
-            # Baca file Shopee
-            if shopee_file.name.endswith('.csv'):
-                df_shopee = pd.read_csv(shopee_file)
+            # Baca file Shopee dengan debug
+            df_shopee = read_shopee_file_debug(shopee_file)
+            
+            if df_shopee is not None and not df_shopee.empty:
+                # Proses Shopee
+                shopee_rows = process_shopee(df_shopee, kamus_data, sku_mapping)
+                all_expanded_rows.extend(shopee_rows)
+                st.sidebar.info(f"📦 Shopee: {len(shopee_rows)} items")
             else:
-                df_shopee = pd.read_excel(shopee_file, engine='openpyxl')
-            
-            st.sidebar.success(f"✅ Shopee loaded: {df_shopee.shape[0]} rows")
-            
-            # Proses Shopee
-            shopee_rows = process_shopee(df_shopee, kamus_data, sku_mapping)
-            all_expanded_rows.extend(shopee_rows)
-            
+                st.sidebar.warning("📦 Shopee: File kosong atau error")
+                
         except Exception as e:
             st.error(f"Error processing Shopee: {str(e)}")
+            st.session_state.debug_info['shopee_process_error'] = str(e)
     
     # Proses Tokped jika ada
     if tokped_file is not None:
         try:
-            # Baca file Tokped
-            if tokped_file.name.endswith('.csv'):
-                df_tokped = pd.read_csv(tokped_file)
+            # Baca file Tokped dengan debug
+            df_tokped = read_tokped_file_debug(tokped_file)
+            
+            if df_tokped is not None and not df_tokped.empty:
+                # Proses Tokped
+                tokped_rows = process_tokped(df_tokped, kamus_data, sku_mapping)
+                all_expanded_rows.extend(tokped_rows)
+                st.sidebar.info(f"🛍️ Tokped: {len(tokped_rows)} items")
             else:
-                df_tokped = pd.read_excel(tokped_file, engine='openpyxl')
-            
-            st.sidebar.success(f"✅ Tokopedia/TikTok loaded: {df_tokped.shape[0]} rows")
-            
-            # Proses Tokped
-            tokped_rows = process_tokped(df_tokped, kamus_data, sku_mapping)
-            all_expanded_rows.extend(tokped_rows)
-            
+                st.sidebar.warning("🛍️ Tokped: File kosong atau error")
+                
         except Exception as e:
             st.error(f"Error processing Tokped: {str(e)}")
+            st.session_state.debug_info['tokped_process_error'] = str(e)
     
     # Jika tidak ada data
     if not all_expanded_rows:
-        return {"error": "❌ Tidak ada data yang berhasil diproses."}
+        error_msg = "❌ Tidak ada data yang berhasil diproses."
+        
+        # Tambahkan debug info ke error message
+        if 'debug_info' in st.session_state and st.session_state.debug_info:
+            error_msg += "\n\n🔍 Debug Info:"
+            
+            if 'shopee_shape' in st.session_state.debug_info:
+                error_msg += f"\n- Shopee shape: {st.session_state.debug_info['shopee_shape']}"
+            
+            if 'tokped_shape' in st.session_state.debug_info:
+                error_msg += f"\n- Tokped shape: {st.session_state.debug_info['tokped_shape']}"
+            
+            if 'shopee_columns' in st.session_state.debug_info:
+                error_msg += f"\n- Shopee columns (10 pertama): {st.session_state.debug_info['shopee_columns']}"
+            
+            if 'tokped_columns' in st.session_state.debug_info:
+                error_msg += f"\n- Tokped columns (10 pertama): {st.session_state.debug_info['tokped_columns']}"
+        
+        return {"error": error_msg}
     
     # Buat DataFrame hasil
     df_expanded = pd.DataFrame(all_expanded_rows)
@@ -515,7 +617,7 @@ def process_all_data(shopee_file, tokped_file, kamus_data):
     
     # Hitung per marketplace
     shopee_count = len([r for r in all_expanded_rows if r['Marketplace'] == 'Shopee'])
-    tokped_count = len([r for r in all_expanded_rows if r['Marketplace'] == 'Tokopedia/TikTok'])
+    tokped_count = len([r for r in all_expanded_rows if r['Marketstate'] == 'Tokopedia/TikTok'])
     
     return {
         'summary': df_summary,
@@ -524,7 +626,8 @@ def process_all_data(shopee_file, tokped_file, kamus_data):
         'processing_time': processing_time,
         'total_items': len(df_expanded),
         'shopee_items': shopee_count,
-        'tokped_items': tokped_count
+        'tokped_items': tokped_count,
+        'debug_info': st.session_state.debug_info
     }
 
 # --- SIDEBAR UPLOAD ---
@@ -557,6 +660,11 @@ with st.sidebar:
     
     st.divider()
     
+    # Debug toggle
+    show_debug = st.checkbox("Show Debug Info", value=False, key="show_debug")
+    
+    st.divider()
+    
     # Check if at least one order file and kamus file are uploaded
     has_order_files = (shopee_file is not None) or (tokped_file is not None)
     
@@ -573,7 +681,7 @@ with st.sidebar:
         if not kamus_file:
             st.warning("⚠️ Upload file kamus")
     
-    st.caption("Version: Simple & Fast - No Filter for Tokped")
+    st.caption("Version: With Debug Info")
 
 # --- MAIN PROCESSING ---
 if all(hasattr(st.session_state, attr) for attr in ['kamus_file']) and \
@@ -608,11 +716,14 @@ if all(hasattr(st.session_state, attr) for attr in ['kamus_file']) and \
                     st.rerun()
                 else:
                     st.error(results["error"])
+                    
+                    # Tampilkan debug info jika ada
+                    if show_debug and 'debug_info' in st.session_state:
+                        with st.expander("🔍 Debug Details", expanded=True):
+                            st.json(st.session_state.debug_info)
         
         except Exception as e:
             st.error(f"❌ Error: {str(e)}")
-            import traceback
-            st.code(traceback.format_exc())
 
 # --- DISPLAY RESULTS ---
 if st.session_state.processed and 'results' in st.session_state:
@@ -688,9 +799,6 @@ if st.session_state.processed and 'results' in st.session_state:
             missing_names = results['picking'][results['picking']['Product Name'] == '']
             if not missing_names.empty:
                 st.warning(f"⚠️ {len(missing_names)} SKU tanpa Product Name")
-                with st.expander("Lihat SKU tanpa Product Name"):
-                    st.dataframe(missing_names[['SKU Component', 'Total Quantity']], 
-                               use_container_width=True)
         else:
             st.info("Tidak ada data untuk picking")
     
@@ -727,6 +835,11 @@ if st.session_state.processed and 'results' in st.session_state:
             st.success("✅ File Excel siap didownload!")
         else:
             st.info("Tidak ada data untuk didownload")
+    
+    # Tampilkan debug info jika diaktifkan
+    if show_debug and 'debug_info' in results:
+        with st.expander("🔍 Debug Information", expanded=False):
+            st.json(results['debug_info'])
 
 else:
     # Landing page
@@ -742,9 +855,10 @@ else:
         4. Klik **PROCESS ALL DATA**
         5. Lihat hasil di 3 tab
         
-        ### **Perbedaan Filter:**
-        - **Shopee**: Filter Perlu Dikirim + No Resi + Instant Kurir
-        - **Tokopedia/TikTok**: TANPA FILTER, proses semua data
+        ### **Fitur Debug:**
+        - ✅ Toggle "Show Debug Info" untuk melihat detail
+        - ✅ Info sheet names, kolom, shape
+        - ✅ Error tracing
         
         ### Format Kamus (Excel):
         - **Sheet 1**: Kurir-Shopee  
@@ -757,4 +871,4 @@ else:
 
 # Footer
 st.divider()
-st.caption("✅ Tokopedia/TikTok: NO FILTER - Process all data")
+st.caption("✅ Dengan Debug Info | Tokped: NO FILTER")
