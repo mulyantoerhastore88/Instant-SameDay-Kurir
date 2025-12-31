@@ -617,7 +617,7 @@ def process_all_data(shopee_file, tokped_file, kamus_data):
     
     # Hitung per marketplace
     shopee_count = len([r for r in all_expanded_rows if r['Marketplace'] == 'Shopee'])
-    tokped_count = len([r for r in all_expanded_rows if r['Marketstate'] == 'Tokopedia/TikTok'])
+    tokped_count = len([r for r in all_expanded_rows if r['Marketplace'] == 'Tokopedia/TikTok'])
     
     return {
         'summary': df_summary,
