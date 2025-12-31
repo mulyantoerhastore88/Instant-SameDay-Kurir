@@ -124,7 +124,7 @@ if order_file and kamus_file:
                 "Qty": qty_order
             })
 
-    detail_df = pd.DataFrame(exploded_rows)
+    DETAIL_COLUMNS = [     "Order ID",     "Original SKU",     "Final SKU",     "Product Name",     "Qty" ]  detail_df = pd.DataFrame(exploded_rows, columns=DETAIL_COLUMNS)
 
     # =================================================
     # PICKING LIST
