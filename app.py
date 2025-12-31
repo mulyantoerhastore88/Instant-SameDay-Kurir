@@ -10,13 +10,13 @@ st.set_page_config(page_title="Universal Order Processor", layout="wide")
 st.title("🛒 Universal Marketplace Order Processor")
 st.markdown("Logic: **Shopee (Instant & No Resi)** | **Tokopedia (Perlu Dikirim)**")
 
-# --- FUNGSI CLEANING SKU (LOGIC KITA) ---
+# --- FUNGSI CLEANING SKU ---
 def clean_sku(sku):
     if pd.isna(sku): return ""
     sku = str(sku).strip()
-    sku = ''.join(char for char in sku if ord(char) >= 32) # Hapus karakter aneh
+    sku = ''.join(char for char in sku if ord(char) >= 32)
     if '-' in sku:
-        return sku.split('-', 1)[-1].strip() # Ambil bagian kanan hyphen
+        return sku.split('-', 1)[-1].strip()
     return sku
 
 # ==========================================
@@ -25,16 +25,13 @@ def clean_sku(sku):
 def process_universal_data(uploaded_files, kamus_data):
     start_time = time.time()
     
-    # 1. Persiapan Kamus
-    df_kurir = kamus_data['kurir']
     df_bundle = kamus_data['bundle']
     df_sku = kamus_data['sku']
+    df_kurir = kamus_data['kurir']
 
-    # Pre-clean Keys di Kamus
     df_bundle['SKU Bundle'] = df_bundle['SKU Bundle'].apply(clean_sku)
     
     # Ambil Kolom B (Kode) & C (Nama) dari SKU Master
-    # Pandas index 1 = B, index 2 = C
     df_sku_lookup = df_sku.iloc[:, [1, 2]].copy()
     df_sku_lookup.columns = ['SKU Component', 'Product Name Master']
     df_sku_lookup['SKU Component'] = df_sku_lookup['SKU Component'].apply(clean_sku)
@@ -47,38 +44,48 @@ def process_universal_data(uploaded_files, kamus_data):
 
     all_expanded_rows = []
 
-    # 2. Proses File Order
     for mp_type, file_obj in uploaded_files:
         try:
+            # Baca file mentah tanpa anggapan header dulu
             if file_obj.name.endswith('.csv'):
-                df_raw = pd.read_csv(file_obj, dtype=str)
-                if len(df_raw.columns) < 2: # Cek jika separator titik koma
-                    file_obj.seek(0)
-                    df_raw = pd.read_csv(file_obj, sep=';', dtype=str)
+                df_raw = pd.read_csv(file_obj, dtype=str, header=None)
             else:
-                df_raw = pd.read_excel(file_obj, dtype=str)
+                df_raw = pd.read_excel(file_obj, dtype=str, header=None)
 
-            # Buang baris deskripsi "Platform unique..." jika ada
-            if len(df_raw) > 0 and str(df_raw.iloc[0, 0]).startswith('Platform unique'):
-                df_raw = df_raw.iloc[1:].reset_index(drop=True)
+            # --- SEARCH REAL HEADER ---
+            # Cari baris mana yang mengandung 'Order Status' atau 'Status Pesanan'
+            header_row_idx = 0
+            for i, row in df_raw.head(10).iterrows():
+                row_str = " ".join([str(x) for x in row.values]).lower()
+                if 'order status' in row_str or 'status pesanan' in row_str:
+                    header_row_idx = i
+                    break
+            
+            # Set header yang benar dan buang baris di atasnya
+            df_actual = df_raw.iloc[header_row_idx:].copy()
+            df_actual.columns = df_actual.iloc[0]
+            df_actual = df_actual.iloc[1:].reset_index(drop=True)
+            df_actual.columns = df_actual.columns.str.strip()
 
             # --- LOGIC SHOPEE ---
             if mp_type == 'Shopee':
-                df_raw.columns = df_raw.columns.str.strip()
-                # Filter: Perlu Dikirim, Not Managed, Kurir Instant, No Resi
-                df_filtered = df_raw[
-                    (df_raw['Status Pesanan'].str.strip() == 'Perlu Dikirim') &
-                    (df_raw['Pesanan yang Dikelola Shopee'].str.strip().str.upper() == 'NO') &
-                    (df_raw['Opsi Pengiriman'].isin(instant_list)) &
-                    (df_raw['No. Resi'].isna() | (df_raw['No. Resi'].astype(str).str.strip() == ''))
+                df_filtered = df_actual[
+                    (df_actual['Status Pesanan'].str.strip() == 'Perlu Dikirim') &
+                    (df_actual['Pesanan yang Dikelola Shopee'].str.strip().str.upper() == 'NO') &
+                    (df_actual['Opsi Pengiriman'].isin(instant_list)) &
+                    (df_actual['No. Resi'].isna() | (df_actual['No. Resi'].astype(str).str.strip() == ''))
                 ].copy()
                 sku_col, qty_col, order_id_col = 'Nomor Referensi SKU', 'Jumlah', 'No. Pesanan'
 
             # --- LOGIC TOKOPEDIA ---
             elif mp_type == 'Tokopedia':
-                df_raw.columns = df_raw.columns.str.strip()
-                # Filter: Perlu dikirim saja
-                df_filtered = df_raw[df_raw['Order Status'].astype(str).str.strip().str.lower() == 'perlu dikirim'].copy()
+                # Pastikan kolom 'Order Status' ada
+                if 'Order Status' not in df_actual.columns:
+                    st.error(f"Kolom 'Order Status' tidak ditemukan di {file_obj.name}. Kolom yang ada: {list(df_actual.columns)}")
+                    continue
+                
+                # Filter: Perlu dikirim (Case Insensitive)
+                df_filtered = df_actual[df_actual['Order Status'].astype(str).str.strip().str.lower() == 'perlu dikirim'].copy()
                 sku_col, qty_col, order_id_col = 'Seller SKU', 'Quantity', 'Order ID'
 
             if df_filtered.empty: continue
@@ -86,22 +93,23 @@ def process_universal_data(uploaded_files, kamus_data):
             # 3. Bundle Expansion
             for _, row in df_filtered.iterrows():
                 sku_key = clean_sku(row[sku_col])
-                qty_order = float(row[qty_col])
+                # Fix: Handle quantity string to float
+                raw_qty = str(row[qty_col]).replace(',', '.')
+                qty_order = float(raw_qty) if raw_qty != 'nan' else 0
                 
                 if sku_key in df_bundle['SKU Bundle'].values:
-                    # Expand Bundle
                     comps = df_bundle[df_bundle['SKU Bundle'] == sku_key]
                     for _, c in comps.iterrows():
+                        comp_qty = float(str(c['Component Quantity']).replace(',', '.'))
                         all_expanded_rows.append({
                             'Marketplace': mp_type,
                             'Order ID': row[order_id_col],
                             'SKU Original': row[sku_col],
                             'Is Bundle?': 'Yes',
                             'SKU Component': clean_sku(c['SKU Component']),
-                            'Qty': qty_order * float(c['Component Quantity'])
+                            'Qty': qty_order * comp_qty
                         })
                 else:
-                    # Satuan
                     all_expanded_rows.append({
                         'Marketplace': mp_type,
                         'Order ID': row[order_id_col],
@@ -116,21 +124,16 @@ def process_universal_data(uploaded_files, kamus_data):
 
     if not all_expanded_rows: return None
 
-    # 4. Finalisasi Data
     df_final = pd.DataFrame(all_expanded_rows)
-    
-    # Lookup Product Name (Delayed)
     df_final = pd.merge(df_final, df_sku_lookup, on='SKU Component', how='left')
     df_final['Product Name'] = df_final['Product Name Master'].fillna(df_final['SKU Component'])
-
-    # Summary
-    df_summary = df_final.groupby(['Marketplace', 'SKU Component', 'Product Name']).agg({'Qty': 'sum'}).reset_index()
     
+    df_summary = df_final.groupby(['Marketplace', 'SKU Component', 'Product Name']).agg({'Qty': 'sum'}).reset_index()
     return {'detail': df_final, 'summary': df_summary}
 
 # --- SIDEBAR UI ---
 st.sidebar.header("📁 Upload File")
-kamus_file = st.sidebar.file_uploader("1. File Kamus Master", type=['xlsx'])
+kamus_file = st.sidebar.file_uploader("1. Upload Kamus.xlsx", type=['xlsx'])
 shopee_file = st.sidebar.file_uploader("2. Order Shopee", type=['csv', 'xlsx'])
 tokped_file = st.sidebar.file_uploader("3. Order Tokopedia", type=['csv', 'xlsx'])
 
@@ -138,32 +141,32 @@ if st.sidebar.button("🚀 PROSES DATA", type="primary", use_container_width=Tru
     if not kamus_file or (not shopee_file and not tokped_file):
         st.error("Upload Kamus dan minimal 1 file Order!")
     else:
-        # Load Kamus
-        excel = pd.ExcelFile(kamus_file)
-        kamus_dict = {
-            'kurir': pd.read_excel(excel, sheet_name='Kurir-Shopee'),
-            'bundle': pd.read_excel(excel, sheet_name='Bundle Master'),
-            'sku': pd.read_excel(excel, sheet_name='SKU Master')
-        }
-        
-        # Build Uploaded List
-        files_to_process = []
-        if shopee_file: files_to_process.append(('Shopee', shopee_file))
-        if tokped_file: files_to_process.append(('Tokopedia', tokped_file))
-        
-        res = process_universal_data(files_to_process, kamus_dict)
-        
-        if res:
-            st.session_state.res = res
-            st.success("Berhasil diproses!")
-        else:
-            st.warning("Tidak ada data yang cocok dengan filter.")
+        try:
+            excel = pd.ExcelFile(kamus_file, engine='openpyxl')
+            kamus_dict = {
+                'kurir': pd.read_excel(excel, sheet_name='Kurir-Shopee'),
+                'bundle': pd.read_excel(excel, sheet_name='Bundle Master'),
+                'sku': pd.read_excel(excel, sheet_name='SKU Master')
+            }
+            
+            files_to_process = []
+            if shopee_file: files_to_process.append(('Shopee', shopee_file))
+            if tokped_file: files_to_process.append(('Tokopedia', tokped_file))
+            
+            res = process_universal_data(files_to_process, kamus_dict)
+            
+            if res:
+                st.session_state.res = res
+                st.success("Berhasil diproses!")
+            else:
+                st.warning("Tidak ada data yang cocok dengan filter.")
+        except Exception as e:
+            st.error(f"Terjadi kesalahan saat membaca Kamus: {e}")
 
 # --- HASIL ---
 if 'res' in st.session_state:
     res = st.session_state.res
     tab1, tab2, tab3 = st.tabs(["📋 Detail Order", "📦 Ringkasan SKU", "📥 Download"])
-    
     with tab1: st.dataframe(res['detail'], use_container_width=True)
     with tab2: st.dataframe(res['summary'], use_container_width=True)
     with tab3:
