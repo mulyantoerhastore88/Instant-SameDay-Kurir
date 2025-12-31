@@ -82,12 +82,47 @@ def read_kamus_file(kamus_file):
             excel_file = pd.ExcelFile(kamus_file, engine='openpyxl')
             sheet_names = excel_file.sheet_names
             
-            # Baca 3 sheet pertama (Kurir, Bundle, SKU Master)
-            df_kurir = pd.read_excel(kamus_file, sheet_name=0, engine='openpyxl')
-            df_bundle = pd.read_excel(kamus_file, sheet_name=1, engine='openpyxl')
-            df_sku = pd.read_excel(kamus_file, sheet_name=2, engine='openpyxl')
+            st.sidebar.info(f"📑 Sheets in Kamus: {sheet_names}")
             
-            st.sidebar.success(f"✅ Kamus: {len(sheet_names)} sheet terbaca")
+            # Cari sheet yang sesuai
+            df_kurir = None
+            df_bundle = None
+            df_sku = None
+            
+            # Cari sheet Kurir-Shopee
+            for sheet in sheet_names:
+                if any(keyword in sheet.lower() for keyword in ['kurir', 'shopee', 'pengiriman']):
+                    df_kurir = pd.read_excel(kamus_file, sheet_name=sheet, engine='openpyxl')
+                    break
+            
+            if df_kurir is None and len(sheet_names) > 0:
+                df_kurir = pd.read_excel(kamus_file, sheet_name=0, engine='openpyxl')
+            
+            # Cari sheet Bundle Master
+            for sheet in sheet_names:
+                if 'bundle' in sheet.lower():
+                    df_bundle = pd.read_excel(kamus_file, sheet_name=sheet, engine='openpyxl')
+                    break
+            
+            if df_bundle is None and len(sheet_names) > 1:
+                df_bundle = pd.read_excel(kamus_file, sheet_name=1, engine='openpyxl')
+            elif df_bundle is None:
+                df_bundle = pd.read_excel(kamus_file, sheet_name=0, engine='openpyxl')
+            
+            # Cari sheet SKU Master
+            for sheet in sheet_names:
+                if 'sku' in sheet.lower() and 'master' in sheet.lower():
+                    df_sku = pd.read_excel(kamus_file, sheet_name=sheet, engine='openpyxl')
+                    break
+            
+            if df_sku is None and len(sheet_names) > 2:
+                df_sku = pd.read_excel(kamus_file, sheet_name=2, engine='openpyxl')
+            elif df_sku is None and len(sheet_names) > 1:
+                df_sku = pd.read_excel(kamus_file, sheet_name=1, engine='openpyxl')
+            else:
+                df_sku = pd.read_excel(kamus_file, sheet_name=0, engine='openpyxl')
+            
+            st.sidebar.success(f"✅ Kamus: 3 sheet terbaca")
             
             return {
                 'kurir': df_kurir,
@@ -98,10 +133,73 @@ def read_kamus_file(kamus_file):
         st.error(f"Error baca file kamus: {str(e)}")
         return None
 
+# --- FUNGSI BACA FILE TOKPED DENGAN SHEET NAME KHUSUS ---
+def read_tokped_file(tokped_file):
+    """Baca file Tokped dengan sheet name khusus"""
+    try:
+        if tokped_file.name.endswith('.csv'):
+            df = pd.read_csv(tokped_file)
+            st.sidebar.info(f"📄 Tokped: CSV file, {df.shape[0]} rows")
+            return df
+        else:
+            # Baca semua sheet names
+            excel_file = pd.ExcelFile(tokped_file, engine='openpyxl')
+            sheet_names = excel_file.sheet_names
+            
+            st.sidebar.info(f"📑 Sheets in Tokped: {sheet_names}")
+            
+            # Cari sheet "OrderSKUList"
+            target_sheet = None
+            for sheet in sheet_names:
+                if 'orderskulist' in sheet.lower():
+                    target_sheet = sheet
+                    break
+            
+            # Jika tidak ketemu, coba sheet lain
+            if target_sheet is None:
+                for sheet in sheet_names:
+                    if any(keyword in sheet.lower() for keyword in ['order', 'sku', 'list']):
+                        target_sheet = sheet
+                        break
+            
+            # Jika masih tidak ketemu, gunakan sheet pertama
+            if target_sheet is None and len(sheet_names) > 0:
+                target_sheet = sheet_names[0]
+            
+            # Baca sheet
+            df = pd.read_excel(tokped_file, sheet_name=target_sheet, engine='openpyxl')
+            st.sidebar.success(f"✅ Tokped: Sheet '{target_sheet}' terbaca, {df.shape[0]} rows")
+            
+            return df
+            
+    except Exception as e:
+        st.error(f"Error membaca file Tokped: {str(e)}")
+        return None
+
+# --- FUNGSI BACA FILE SHOPEE ---
+def read_shopee_file(shopee_file):
+    """Baca file Shopee"""
+    try:
+        if shopee_file.name.endswith('.csv'):
+            df = pd.read_csv(shopee_file)
+            st.sidebar.info(f"📄 Shopee: CSV file, {df.shape[0]} rows")
+            return df
+        else:
+            # Baca sheet pertama
+            df = pd.read_excel(shopee_file, sheet_name=0, engine='openpyxl')
+            st.sidebar.success(f"✅ Shopee: Sheet pertama terbaca, {df.shape[0]} rows")
+            return df
+    except Exception as e:
+        st.error(f"Error membaca file Shopee: {str(e)}")
+        return None
+
 # --- FUNGSI PROCESS SHOPEE ---
 def process_shopee(df_shopee, kamus_data, sku_mapping):
     """Proses data Shopee dengan filter"""
     expanded_rows = []
+    
+    if df_shopee is None or df_shopee.empty:
+        return expanded_rows
     
     # Ambil data dari kamus
     df_kurir = kamus_data['kurir']
@@ -138,74 +236,72 @@ def process_shopee(df_shopee, kamus_data, sku_mapping):
     df_shopee.columns = [str(col).strip() for col in df_shopee.columns]
     
     # Debug: tampilkan kolom yang ada
-    st.sidebar.write(f"📦 Kolom Shopee: {list(df_shopee.columns)[:10]}...")
+    st.sidebar.write(f"📦 Kolom Shopee (10 pertama): {list(df_shopee.columns)[:10]}")
     
-    # Rename columns jika perlu - FLEKSIBEL
-    column_mappings = [
-        # Format 1
-        {
-            'No. Pesanan': 'order_id',
-            'Status Pesanan': 'status', 
-            'Pesanan yang Dikelola Shopee': 'managed_shopee',
-            'Opsi Pengiriman': 'shipping',
-            'No. Resi': 'resi',
-            'Nomor Referensi SKU': 'sku_reference',
-            'SKU Induk': 'sku_induk', 
-            'Nama Produk': 'product_name',
-            'Jumlah': 'quantity'
-        },
-        # Format 2 (alternatif)
-        {
-            'No Pesanan': 'order_id',
-            'Status': 'status',
-            'Dikelola Shopee': 'managed_shopee',
-            'Pengiriman': 'shipping',
-            'Resi': 'resi',
-            'SKU': 'sku_reference',
-            'Qty': 'quantity'
-        }
-    ]
+    # Cari kolom yang diperlukan
+    order_id_col = None
+    status_col = None
+    sku_col = None
+    qty_col = None
     
-    # Coba mapping
-    df_shopee_clean = df_shopee.copy()
-    for mapping in column_mappings:
-        for old_col, new_col in mapping.items():
-            if old_col in df_shopee_clean.columns:
-                df_shopee_clean.rename(columns={old_col: new_col}, inplace=True)
+    for col in df_shopee.columns:
+        col_lower = col.lower()
+        if 'pesanan' in col_lower and ('no' in col_lower or 'id' in col_lower):
+            order_id_col = col
+        elif 'status' in col_lower:
+            status_col = col
+        elif 'sku' in col_lower or 'referensi' in col_lower:
+            sku_col = col
+        elif 'jumlah' in col_lower or 'qty' in col_lower or 'quantity' in col_lower:
+            qty_col = col
     
-    # Pastikan kolom required ada
-    required_cols = ['order_id', 'sku_reference', 'quantity']
-    for col in required_cols:
-        if col not in df_shopee_clean.columns:
-            # Cari kolom yang mirip
-            for actual_col in df_shopee_clean.columns:
-                if col in actual_col.lower():
-                    df_shopee_clean.rename(columns={actual_col: col}, inplace=True)
-                    break
+    # Jika tidak ketemu, gunakan default
+    if not order_id_col and len(df_shopee.columns) > 0:
+        order_id_col = df_shopee.columns[0]
     
-    # Filter untuk Shopee: Perlu Dikirim + No Resi + Instant Kurir
-    df_filtered = df_shopee_clean.copy()
+    if not sku_col and len(df_shopee.columns) > 1:
+        # Coba cari kolom yang mungkin berisi SKU
+        for col in df_shopee.columns:
+            if any(keyword in col.lower() for keyword in ['produk', 'nama', 'item']):
+                sku_col = col
+                break
+        if not sku_col:
+            sku_col = df_shopee.columns[1]
+    
+    if not qty_col and len(df_shopee.columns) > 2:
+        qty_col = df_shopee.columns[2]
+    
+    st.sidebar.write(f"🔍 Shopee cols: order={order_id_col}, sku={sku_col}, qty={qty_col}")
+    
+    # Filter untuk Shopee
+    df_filtered = df_shopee.copy()
     
     # Filter status jika ada
-    if 'status' in df_filtered.columns:
+    if status_col:
         df_filtered = df_filtered[
-            df_filtered['status'].astype(str).str.upper().str.contains('PERLU DIKIRIM')
+            df_filtered[status_col].astype(str).str.upper().str.contains('PERLU DIKIRIM')
         ]
     
     # Filter managed by shopee jika ada
-    if 'managed_shopee' in df_filtered.columns:
+    managed_cols = [col for col in df_filtered.columns if 'kelola' in col.lower() or 'managed' in col.lower()]
+    if managed_cols:
+        managed_col = managed_cols[0]
         df_filtered = df_filtered[
-            df_filtered['managed_shopee'].astype(str).str.upper().str.contains('NO')
+            df_filtered[managed_col].astype(str).str.upper().str.contains('NO')
         ]
     
     # Filter no resi jika ada
-    if 'resi' in df_filtered.columns:
+    resi_cols = [col for col in df_filtered.columns if 'resi' in col.lower() or 'tracking' in col.lower()]
+    if resi_cols:
+        resi_col = resi_cols[0]
         df_filtered = df_filtered[
-            df_filtered['resi'].isna() | (df_filtered['resi'].astype(str).str.strip() == '')
+            df_filtered[resi_col].isna() | (df_filtered[resi_col].astype(str).str.strip() == '')
         ]
     
     # Filter instant kurir jika ada
-    if 'shipping' in df_filtered.columns:
+    shipping_cols = [col for col in df_filtered.columns if 'pengiriman' in col.lower() or 'shipping' in col.lower()]
+    if shipping_cols:
+        shipping_col = shipping_cols[0]
         # Get instant/same day kurir
         df_kurir['Opsi Pengiriman'] = df_kurir.iloc[:, 0].astype(str).str.strip()
         df_kurir['Instant/Same Day'] = df_kurir.iloc[:, 1].astype(str).str.strip()
@@ -214,7 +310,7 @@ def process_shopee(df_shopee, kamus_data, sku_mapping):
             df_kurir['Instant/Same Day'].str.upper().str.contains('YES')
         ]['Opsi Pengiriman'].unique()
         
-        df_filtered = df_filtered[df_filtered['shipping'].isin(instant_kurir)]
+        df_filtered = df_filtered[df_filtered[shipping_col].isin(instant_kurir)]
     
     if df_filtered.empty:
         st.sidebar.warning("⚠️ Tidak ada data Shopee setelah filter")
@@ -222,37 +318,35 @@ def process_shopee(df_shopee, kamus_data, sku_mapping):
     
     # Process each row
     for _, row in df_filtered.iterrows():
-        # Cari SKU dari berbagai kolom
-        sku_candidates = []
+        # Ambil SKU
+        sku_value = ""
+        if sku_col and sku_col in row and pd.notna(row[sku_col]):
+            sku_value = str(row[sku_col])
         
-        # Prioritaskan kolom SKU
-        sku_cols = [col for col in df_filtered.columns if 'sku' in col.lower()]
-        for col in sku_cols:
-            if col in row and pd.notna(row[col]) and str(row[col]).strip():
-                sku_candidates.append(str(row[col]))
-        
-        # Jika tidak ada, coba product name
-        if not sku_candidates and 'product_name' in row:
-            sku_candidates.append(str(row['product_name']))
-        
-        sku_awal = ''
-        for candidate in sku_candidates:
-            cleaned = clean_sku(candidate)
-            if cleaned:
-                sku_awal = cleaned
-                break
+        sku_awal = clean_sku(sku_value)
         
         if not sku_awal:
             continue
             
-        qty = float(row['quantity']) if 'quantity' in row and pd.notna(row['quantity']) else 1.0
+        # Ambil quantity
+        qty = 1.0
+        if qty_col and qty_col in row and pd.notna(row[qty_col]):
+            try:
+                qty = float(row[qty_col])
+            except:
+                qty = 1.0
+        
+        # Ambil order ID
+        order_id = ""
+        if order_id_col and order_id_col in row and pd.notna(row[order_id_col]):
+            order_id = str(row[order_id_col])
         
         if sku_awal in bundle_mapping:
             # Bundle
             for component_sku, comp_qty in bundle_mapping[sku_awal]:
                 expanded_rows.append({
                     'Marketplace': 'Shopee',
-                    'Order ID': str(row.get('order_id', '')),
+                    'Order ID': order_id,
                     'Original SKU': sku_awal,
                     'Is Bundle': 'Yes',
                     'SKU Component': component_sku,
@@ -263,7 +357,7 @@ def process_shopee(df_shopee, kamus_data, sku_mapping):
             # Single
             expanded_rows.append({
                 'Marketplace': 'Shopee',
-                'Order ID': str(row.get('order_id', '')),
+                'Order ID': order_id,
                 'Original SKU': sku_awal,
                 'Is Bundle': 'No',
                 'SKU Component': sku_awal,
@@ -278,6 +372,9 @@ def process_shopee(df_shopee, kamus_data, sku_mapping):
 def process_tokped(df_tokped, kamus_data, sku_mapping):
     """Proses data Tokopedia/TikTok TANPA FILTER"""
     expanded_rows = []
+    
+    if df_tokped is None or df_tokped.empty:
+        return expanded_rows
     
     # Ambil bundle data dari kamus
     df_bundle = kamus_data['bundle']
@@ -313,79 +410,65 @@ def process_tokped(df_tokped, kamus_data, sku_mapping):
     df_tokped.columns = [str(col).strip() for col in df_tokped.columns]
     
     # Debug: tampilkan kolom yang ada
-    st.sidebar.write(f"🛍️ Kolom Tokped: {list(df_tokped.columns)[:10]}...")
+    st.sidebar.write(f"🛍️ Kolom Tokped (10 pertama): {list(df_tokped.columns)[:10]}")
     
-    # Cari kolom yang dibutuhkan dengan FLEKSIBEL
-    df_tokped_clean = df_tokped.copy()
+    # Cari kolom yang diperlukan
+    order_id_col = None
+    sku_col = None
+    qty_col = None
     
-    # Mapping untuk Tokped
-    tokped_mappings = [
-        # Format lengkap
-        {
-            'Order ID': 'order_id',
-            'Seller SKU': 'sku_reference', 
-            'Quantity': 'quantity',
-            'Tracking ID': 'tracking_id'
-        },
-        # Format alternatif
-        {
-            'OrderID': 'order_id',
-            'SKU': 'sku_reference',
-            'Qty': 'quantity',
-            'Tracking': 'tracking_id'
-        }
-    ]
+    for col in df_tokped.columns:
+        col_lower = col.lower()
+        if 'order' in col_lower and 'id' in col_lower:
+            order_id_col = col
+        elif 'seller' in col_lower and 'sku' in col_lower:
+            sku_col = col
+        elif 'quantity' in col_lower and 'sku' not in col_lower:  # Hindari "Sku Quantity of return"
+            qty_col = col
     
-    # Coba mapping
-    for mapping in tokped_mappings:
-        for old_col, new_col in mapping.items():
-            if old_col in df_tokped_clean.columns:
-                df_tokped_clean.rename(columns={old_col: new_col}, inplace=True)
-    
-    # Jika belum ketemu, cari dengan contains
-    if 'order_id' not in df_tokped_clean.columns:
-        for col in df_tokped_clean.columns:
-            if 'order' in col.lower() and 'id' in col.lower():
-                df_tokped_clean.rename(columns={col: 'order_id'}, inplace=True)
-                break
-    
-    if 'sku_reference' not in df_tokped_clean.columns:
-        for col in df_tokped_clean.columns:
+    # Coba alternatif
+    if not sku_col:
+        for col in df_tokped.columns:
             if 'sku' in col.lower():
-                df_tokped_clean.rename(columns={col: 'sku_reference'}, inplace=True)
+                sku_col = col
                 break
     
-    if 'quantity' not in df_tokped_clean.columns:
-        for col in df_tokped_clean.columns:
-            if 'quantity' in col.lower() or 'qty' in col.lower():
-                df_tokped_clean.rename(columns={col: 'quantity'}, inplace=True)
+    if not qty_col:
+        for col in df_tokped.columns:
+            if 'qty' in col.lower() or 'quantity' in col.lower():
+                qty_col = col
                 break
     
-    # Pastikan kolom required ada
-    if 'order_id' not in df_tokped_clean.columns:
-        df_tokped_clean['order_id'] = range(1, len(df_tokped_clean) + 1)
-    
-    if 'sku_reference' not in df_tokped_clean.columns:
-        df_tokped_clean['sku_reference'] = ''
-    
-    if 'quantity' not in df_tokped_clean.columns:
-        df_tokped_clean['quantity'] = 1
+    st.sidebar.write(f"🔍 Tokped cols: order={order_id_col}, sku={sku_col}, qty={qty_col}")
     
     # **PENTING: TIDAK ADA FILTER UNTUK TOKPED**
     # Langsung proses semua data karena sudah difilter dari MP
-    df_filtered = df_tokped_clean
+    df_filtered = df_tokped
     
-    st.sidebar.info(f"📊 Tokped: Processing {len(df_filtered)} rows (no filter)")
+    # Jika tidak ada kolom yang diperlukan, gunakan default
+    if not order_id_col and len(df_filtered.columns) > 0:
+        order_id_col = df_filtered.columns[0]
+    
+    if not sku_col and len(df_filtered.columns) > 1:
+        sku_col = df_filtered.columns[1]
+    
+    if not qty_col and len(df_filtered.columns) > 2:
+        qty_col = df_filtered.columns[2]
     
     # Process each row
     processed_count = 0
-    for _, row in df_filtered.iterrows():
-        sku_awal = clean_sku(str(row.get('sku_reference', '')))
+    for idx, row in df_filtered.iterrows():
+        # Ambil SKU
+        sku_value = ""
+        if sku_col and sku_col in row and pd.notna(row[sku_col]):
+            sku_value = str(row[sku_col])
+        
+        sku_awal = clean_sku(sku_value)
         
         if not sku_awal:
-            # Coba cari SKU dari kolom lain
+            # Coba kolom lain untuk SKU
             for col in df_filtered.columns:
-                if col not in ['order_id', 'quantity'] and pd.notna(row[col]):
+                if col not in [order_id_col, qty_col] and pd.notna(row[col]):
                     cleaned = clean_sku(str(row[col]))
                     if cleaned:
                         sku_awal = cleaned
@@ -394,17 +477,25 @@ def process_tokped(df_tokped, kamus_data, sku_mapping):
         if not sku_awal:
             continue
             
-        try:
-            qty = float(row['quantity']) if pd.notna(row['quantity']) else 1.0
-        except:
-            qty = 1.0
+        # Ambil quantity
+        qty = 1.0
+        if qty_col and qty_col in row and pd.notna(row[qty_col]):
+            try:
+                qty = float(row[qty_col])
+            except:
+                qty = 1.0
+        
+        # Ambil order ID
+        order_id = f"TOKPED_{idx+1}"  # Default jika tidak ada
+        if order_id_col and order_id_col in row and pd.notna(row[order_id_col]):
+            order_id = str(row[order_id_col])
         
         if sku_awal in bundle_mapping:
             # Bundle
             for component_sku, comp_qty in bundle_mapping[sku_awal]:
                 expanded_rows.append({
                     'Marketplace': 'Tokopedia/TikTok',
-                    'Order ID': str(row.get('order_id', '')),
+                    'Order ID': order_id,
                     'Original SKU': sku_awal,
                     'Is Bundle': 'Yes',
                     'SKU Component': component_sku,
@@ -416,7 +507,7 @@ def process_tokped(df_tokped, kamus_data, sku_mapping):
             # Single
             expanded_rows.append({
                 'Marketplace': 'Tokopedia/TikTok',
-                'Order ID': str(row.get('order_id', '')),
+                'Order ID': order_id,
                 'Original SKU': sku_awal,
                 'Is Bundle': 'No',
                 'SKU Component': sku_awal,
@@ -441,41 +532,41 @@ def process_all_data(shopee_file, tokped_file, kamus_data):
     if shopee_file is not None:
         try:
             # Baca file Shopee
-            if shopee_file.name.endswith('.csv'):
-                df_shopee = pd.read_csv(shopee_file)
+            df_shopee = read_shopee_file(shopee_file)
+            
+            if df_shopee is not None and not df_shopee.empty:
+                # Proses Shopee
+                shopee_rows = process_shopee(df_shopee, kamus_data, sku_mapping)
+                all_expanded_rows.extend(shopee_rows)
+                st.sidebar.info(f"Shopee: {len(shopee_rows)} items")
             else:
-                df_shopee = pd.read_excel(shopee_file, engine='openpyxl')
-            
-            st.sidebar.success(f"✅ Shopee loaded: {df_shopee.shape[0]} rows")
-            
-            # Proses Shopee
-            shopee_rows = process_shopee(df_shopee, kamus_data, sku_mapping)
-            all_expanded_rows.extend(shopee_rows)
-            
+                st.sidebar.warning("Shopee: File kosong atau error")
+                
         except Exception as e:
             st.error(f"Error processing Shopee: {str(e)}")
     
     # Proses Tokped jika ada
     if tokped_file is not None:
         try:
-            # Baca file Tokped
-            if tokped_file.name.endswith('.csv'):
-                df_tokped = pd.read_csv(tokped_file)
+            # Baca file Tokped dengan sheet name khusus
+            df_tokped = read_tokped_file(tokped_file)
+            
+            if df_tokped is not None and not df_tokped.empty:
+                # Proses Tokped
+                tokped_rows = process_tokped(df_tokped, kamus_data, sku_mapping)
+                all_expanded_rows.extend(tokped_rows)
+                st.sidebar.info(f"Tokped: {len(tokped_rows)} items")
             else:
-                df_tokped = pd.read_excel(tokped_file, engine='openpyxl')
-            
-            st.sidebar.success(f"✅ Tokopedia/TikTok loaded: {df_tokped.shape[0]} rows")
-            
-            # Proses Tokped
-            tokped_rows = process_tokped(df_tokped, kamus_data, sku_mapping)
-            all_expanded_rows.extend(tokped_rows)
-            
+                st.sidebar.warning("Tokped: File kosong atau error")
+                
         except Exception as e:
             st.error(f"Error processing Tokped: {str(e)}")
+            import traceback
+            st.code(traceback.format_exc())
     
     # Jika tidak ada data
     if not all_expanded_rows:
-        return {"error": "❌ Tidak ada data yang berhasil diproses."}
+        return {"error": "❌ Tidak ada data yang berhasil diproses. Periksa:\n1. File format dan sheet name\n2. Kolom yang diperlukan ada\n3. File tidak kosong"}
     
     # Buat DataFrame hasil
     df_expanded = pd.DataFrame(all_expanded_rows)
@@ -543,7 +634,7 @@ with st.sidebar:
     tokped_file = st.file_uploader(
         "Upload file Tokopedia/TikTok",
         type=['csv', 'xlsx', 'xls'],
-        help="File order dari Tokopedia atau TikTok (opsional)",
+        help="File order dari Tokopedia atau TikTok (sheet: OrderSKUList)",
         key="tokped"
     )
     
@@ -573,7 +664,7 @@ with st.sidebar:
         if not kamus_file:
             st.warning("⚠️ Upload file kamus")
     
-    st.caption("Version: Simple & Fast - No Filter for Tokped")
+    st.caption("Version: Support Sheet Name 'OrderSKUList'")
 
 # --- MAIN PROCESSING ---
 if all(hasattr(st.session_state, attr) for attr in ['kamus_file']) and \
@@ -737,19 +828,19 @@ else:
         ## 📋 Cara Pakai:
         
         1. **Upload file Shopee** (opsional - filter: Perlu Dikirim + No Resi + Instant)
-        2. **Upload file Tokopedia/TikTok** (opsional - TANPA FILTER, proses semua)
+        2. **Upload file Tokopedia/TikTok** (opsional - sheet name: OrderSKUList)
         3. **Upload file kamus** (wajib - Excel dengan 3 sheet)
         4. Klik **PROCESS ALL DATA**
         5. Lihat hasil di 3 tab
         
-        ### **Perbedaan Filter:**
-        - **Shopee**: Filter Perlu Dikirim + No Resi + Instant Kurir
-        - **Tokopedia/TikTok**: TANPA FILTER, proses semua data
+        ### **Catatan Penting:**
+        - **Tokped**: Sheet name harus "OrderSKUList" (case insensitive)
+        - **Shopee**: Tanpa sheet name khusus
+        - **Kamus**: 3 sheet (Kurir, Bundle, SKU Master)
         
-        ### Format Kamus (Excel):
-        - **Sheet 1**: Kurir-Shopee  
-        - **Sheet 2**: Bundle Master  
-        - **Sheet 3**: SKU Master (kolom B → C)
+        ### Kolom yang Dicari:
+        - **Shopee**: No. Pesanan, Status Pesanan, SKU, Jumlah
+        - **Tokped**: Order ID, Seller SKU, Quantity
         """)
     
     with col2:
@@ -757,4 +848,4 @@ else:
 
 # Footer
 st.divider()
-st.caption("✅ Tokopedia/TikTok: NO FILTER - Process all data")
+st.caption("✅ Support Sheet Name: 'OrderSKUList' untuk Tokopedia/TikTok")
