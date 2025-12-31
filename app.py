@@ -49,21 +49,48 @@ def clean_df_strings(df):
         df[col] = df[col].astype(str).str.strip()
     return df
 
+def smart_rename_columns(df, target_map):
+    """
+    Rename kolom dengan pencocokan fleksibel (ignore case, ignore space).
+    target_map: {'target_col': ['possible_name1', 'possible_name2']}
+    """
+    # Buat dictionary map dari clean_name -> original_name
+    clean_cols = {c.lower().replace(' ', '').replace('_', '').replace('.', ''): c for c in df.columns}
+    
+    rename_dict = {}
+    found_cols = []
+    
+    for target, candidates in target_map.items():
+        match_found = False
+        for cand in candidates:
+            cand_clean = cand.lower().replace(' ', '').replace('_', '').replace('.', '')
+            if cand_clean in clean_cols:
+                original_name = clean_cols[cand_clean]
+                rename_dict[original_name] = target
+                found_cols.append(target)
+                match_found = True
+                break
+    
+    if rename_dict:
+        df = df.rename(columns=rename_dict)
+        
+    return df, found_cols
+
 def standardize_shopee_data(df):
-    df.columns = df.columns.str.strip()
-    col_map = {
-        'No. Pesanan': 'order_id',
-        'Status Pesanan': 'status',
-        'Pesanan yang Dikelola Shopee': 'managed_by_platform',
-        'Opsi Pengiriman': 'shipping_option',
-        'No. Resi': 'tracking_id',
-        'Nomor Referensi SKU': 'sku_reference',
-        'SKU Induk': 'parent_sku',
-        'Nama Produk': 'product_name_raw',
-        'Jumlah': 'quantity',
-        'Pesanan Harus Dikirimkan Sebelum (Menghindari keterlambatan)': 'deadline'
+    # Mapping Target -> List Kemungkinan Nama Kolom
+    target_map = {
+        'order_id': ['No. Pesanan', 'Order ID', 'No Pesanan'],
+        'status': ['Status Pesanan', 'Status'],
+        'managed_by_platform': ['Pesanan yang Dikelola Shopee', 'Dikelola Shopee'],
+        'shipping_option': ['Opsi Pengiriman', 'Jasa Kirim'],
+        'tracking_id': ['No. Resi', 'Tracking Number'],
+        'sku_reference': ['Nomor Referensi SKU', 'SKU Induk', 'SKU Reference'],
+        'product_name_raw': ['Nama Produk', 'Product Name'],
+        'quantity': ['Jumlah', 'Quantity'],
+        'deadline': ['Pesanan Harus Dikirimkan Sebelum', 'Ship By Date']
     }
-    df = df.rename(columns=col_map)
+    
+    df, _ = smart_rename_columns(df, target_map)
     df['marketplace'] = 'Shopee'
     
     # Safety columns
@@ -72,44 +99,44 @@ def standardize_shopee_data(df):
     return df
 
 def standardize_tokped_data(df):
-    # Bersihkan nama kolom dari spasi/enter
-    df.columns = df.columns.astype(str).str.replace('\n', ' ').str.strip()
-    
-    col_map = {
-        'Order ID': 'order_id',          
-        'Order Status': 'status',        
-        'Seller SKU': 'sku_reference',   
-        'Product Name': 'product_name_raw', 
-        'Quantity': 'quantity',          
-        'Delivery Option': 'shipping_option', 
-        'Tracking ID': 'tracking_id',
-        'No. Resi': 'tracking_id'
+    # Mapping Target -> List Kemungkinan Nama Kolom
+    target_map = {
+        'order_id': ['Order ID', 'Nomor Invoice', 'Invoice'],
+        'status': ['Order Status', 'Status Pesanan', 'Status'],
+        'sku_reference': ['Seller SKU', 'Nomor SKU', 'SKU'],
+        'product_name_raw': ['Product Name', 'Nama Produk'],
+        'quantity': ['Quantity', 'Jumlah Produk', 'Jumlah'],
+        'shipping_option': ['Delivery Option', 'Pengiriman', 'Kurir'],
+        'tracking_id': ['Tracking ID', 'No. Resi', 'No Resi', 'Kode Booking']
     }
     
-    # Rename kolom (ignore case agar lebih robust)
-    df = df.rename(columns=col_map)
+    df, found = smart_rename_columns(df, target_map)
     df['marketplace'] = 'Tokopedia'
     
     # Safety columns
     if 'managed_by_platform' not in df.columns: df['managed_by_platform'] = 'No'
     if 'tracking_id' not in df.columns: df['tracking_id'] = ''
     if 'shipping_option' not in df.columns: df['shipping_option'] = '' 
+    
+    # Cek apakah status ketemu
+    if 'status' not in df.columns:
+        # Debugging info
+        return df, False, list(df.columns)
         
-    return df
+    return df, True, []
 
 def standardize_tiktok_data(df):
-    df.columns = df.columns.str.strip()
-    col_map = {
-        'Order ID': 'order_id',
-        'Order Status': 'status',
-        'Seller SKU': 'sku_reference',
-        'Product Name': 'product_name_raw',
-        'Quantity': 'quantity',
-        'Tracking ID': 'tracking_id',
-        'Shipping Provider Name': 'shipping_option',
-        'Delivery Option': 'shipping_option'
+    target_map = {
+        'order_id': ['Order ID'],
+        'status': ['Order Status', 'Status'],
+        'sku_reference': ['Seller SKU', 'SKU'],
+        'product_name_raw': ['Product Name', 'Nama Produk'],
+        'quantity': ['Quantity', 'Jumlah'],
+        'tracking_id': ['Tracking ID', 'No Resi'],
+        'shipping_option': ['Shipping Provider Name', 'Delivery Option', 'Kurir']
     }
-    df = df.rename(columns=col_map)
+    
+    df, _ = smart_rename_columns(df, target_map)
     df['marketplace'] = 'TikTok'
     df['managed_by_platform'] = 'No'
     if 'shipping_option' not in df.columns: df['shipping_option'] = ''
@@ -154,47 +181,73 @@ def process_data(uploaded_files, kamus_data):
     
     for mp_type, file_obj in uploaded_files:
         try:
-            if file_obj.name.endswith('.csv'):
+            # --- SUPER ROBUST FILE READER ---
+            # Mencoba membaca file dengan berbagai engine dan separator
+            file_content = file_obj.getvalue()
+            df_raw = None
+            
+            # Coba baca sebagai Excel dulu
+            try:
+                df_raw = pd.read_excel(io.BytesIO(file_content), dtype=str)
+            except:
+                pass
+            
+            # Jika gagal, coba baca sebagai CSV (koma)
+            if df_raw is None:
                 try:
-                    df_raw = pd.read_csv(file_obj, dtype=str)
-                    if len(df_raw.columns) < 2:
-                        file_obj.seek(0)
-                        df_raw = pd.read_csv(file_obj, sep=';', dtype=str)
+                    df_raw = pd.read_csv(io.BytesIO(file_content), sep=',', dtype=str)
+                    if len(df_raw.columns) < 2: raise ValueError("Not comma")
                 except:
-                     file_obj.seek(0)
-                     df_raw = pd.read_csv(file_obj, sep=';', dtype=str)
-            else:
-                df_raw = pd.read_excel(file_obj, dtype=str)
-            
-            # --- FIX UTAMA: PEMBERSIHAN HEADER ---
-            # Cek apakah baris pertama (index 0) adalah deskripsi sampah "Platform unique..."
+                    # Jika gagal, coba baca sebagai CSV (titik koma)
+                    try:
+                        df_raw = pd.read_csv(io.BytesIO(file_content), sep=';', dtype=str)
+                    except:
+                        st.error(f"Gagal membaca format file {file_obj.name}. Pastikan file Excel/CSV valid.")
+                        continue
+
+            # --- HEADER CLEANING ---
+            # Deteksi jika baris pertama adalah deskripsi (Platform unique...)
             if len(df_raw) > 0:
-                first_cell = str(df_raw.iloc[0, 0])
-                if first_cell.startswith('Platform unique'):
-                    # Hapus baris 0 saja, header asli (yang dibaca pandas) TETAP DIPERTAHANKAN
-                    df_raw = df_raw.iloc[1:].reset_index(drop=True)
-            
+                # Cek 3 baris pertama untuk mencari Header "Order Status" atau "Order ID"
+                header_idx = -1
+                for i in range(min(5, len(df_raw))):
+                    row_str = str(df_raw.iloc[i].values).lower()
+                    if 'order status' in row_str or 'status pesanan' in row_str or 'order id' in row_str:
+                        header_idx = i
+                        break
+                
+                if header_idx > 0:
+                    # Reset header ke baris yang benar
+                    df_raw.columns = df_raw.iloc[header_idx]
+                    df_raw = df_raw.iloc[header_idx+1:].reset_index(drop=True)
+                elif header_idx == 0:
+                    # Header sudah benar di baris 0
+                    pass
+                else:
+                    # Header tidak ketemu di 5 baris pertama, coba pakai baris 0 (default)
+                    pass
+
         except Exception as e:
-            st.error(f"Gagal membaca file {file_obj.name}: {e}")
+            st.error(f"Error fatal saat membaca file {file_obj.name}: {e}")
             continue
             
-        # Standardize
+        # Standardize & Filter
         if mp_type == 'Shopee':
             df_std = standardize_shopee_data(df_raw)
             if 'status' not in df_std.columns:
-                return {'error': f"Kolom 'Status Pesanan' tidak ditemukan di Shopee. Kolom terbaca: {list(df_std.columns)}"}
+                return {'error': f"Kolom 'Status Pesanan' tidak terdeteksi di file Shopee. Kolom terbaca: {list(df_std.columns)}"}
                 
             df_filtered = df_std[
-                (df_std['status'].str.upper() == 'PERLU DIKIRIM') &
-                (df_std['managed_by_platform'].str.upper().isin(['NO', 'TIDAK'])) &
+                (df_std['status'].astype(str).str.upper() == 'PERLU DIKIRIM') &
+                (df_std['managed_by_platform'].astype(str).str.upper().isin(['NO', 'TIDAK'])) &
                 (df_std['shipping_option'].isin(instant_options)) &
-                ((df_std['tracking_id'].isna()) | (df_std['tracking_id'] == '') | (df_std['tracking_id'] == 'nan'))
+                ((df_std['tracking_id'].isna()) | (df_std['tracking_id'].astype(str) == '') | (df_std['tracking_id'].astype(str) == 'nan'))
             ].copy()
             
         elif mp_type == 'Tokopedia':
-            df_std = standardize_tokped_data(df_raw)
-            if 'status' not in df_std.columns:
-                return {'error': f"Kolom 'Order Status' tidak ditemukan di Tokopedia. Kolom terbaca: {list(df_std.columns)}"}
+            df_std, success, cols = standardize_tokped_data(df_raw)
+            if not success:
+                return {'error': f"Kolom 'Order Status' tidak terdeteksi di file Tokopedia. Kolom terbaca: {cols}. Pastikan header file benar."}
                 
             # Filter Tokped: Case Insensitive 'Perlu dikirim'
             df_filtered = df_std[
@@ -204,11 +257,11 @@ def process_data(uploaded_files, kamus_data):
         elif mp_type == 'TikTok':
             df_std = standardize_tiktok_data(df_raw)
             if 'status' not in df_std.columns:
-                return {'error': f"Kolom 'Order Status' tidak ditemukan di TikTok. Kolom terbaca: {list(df_std.columns)}"}
+                return {'error': f"Kolom 'Order Status' tidak terdeteksi di file TikTok."}
                 
             df_filtered = df_std[
-                (df_std['status'].str.upper().isin(['AWAITING SHIPMENT', 'AWAITING COLLECTION'])) &
-                ((df_std['tracking_id'].isna()) | (df_std['tracking_id'] == '') | (df_std['tracking_id'] == 'nan'))
+                (df_std['status'].astype(str).str.upper().isin(['AWAITING SHIPMENT', 'AWAITING COLLECTION'])) &
+                ((df_std['tracking_id'].isna()) | (df_std['tracking_id'].astype(str) == '') | (df_std['tracking_id'].astype(str) == 'nan'))
             ].copy()
             
         if df_filtered.empty:
@@ -223,7 +276,7 @@ def process_data(uploaded_files, kamus_data):
         for _, row in df_filtered.iterrows():
             sku_key = row['sku_clean']
             qty_order = row['quantity']
-            ship_opt = row.get('shipping_option', '')
+            ship_opt = str(row.get('shipping_option', ''))
             
             if sku_key in bundle_skus:
                 components = df_bundle[df_bundle['SKU Bundle'] == sku_key]
@@ -259,7 +312,7 @@ def process_data(uploaded_files, kamus_data):
                 })
 
     if not all_expanded_rows:
-        return {'error': '❌ Tidak ada data yang memenuhi kriteria filter.'}
+        return {'error': '❌ Tidak ada data yang memenuhi kriteria filter (Status Perlu Dikirim / No Resi Kosong).'}
 
     df_result = pd.DataFrame(all_expanded_rows)
     
@@ -310,11 +363,12 @@ if st.sidebar.button("🚀 PROSES DATA", type="primary", use_container_width=Tru
     else:
         with st.spinner("Sedang memproses..."):
             try:
-                excel_kamus = pd.ExcelFile(kamus_file)
+                # Baca Excel Kamus dengan Engine Openpyxl
+                excel_kamus = pd.ExcelFile(kamus_file, engine='openpyxl')
                 kamus_dict = {
-                    'kurir': pd.read_excel(kamus_file, sheet_name='Kurir-Shopee'),
-                    'bundle': pd.read_excel(kamus_file, sheet_name='Bundle Master'),
-                    'sku': pd.read_excel(kamus_file, sheet_name='SKU Master')
+                    'kurir': pd.read_excel(excel_kamus, sheet_name='Kurir-Shopee'),
+                    'bundle': pd.read_excel(excel_kamus, sheet_name='Bundle Master'),
+                    'sku': pd.read_excel(excel_kamus, sheet_name='SKU Master')
                 }
                 res = process_data(mp_files, kamus_dict)
                 
