@@ -12,64 +12,95 @@ st.markdown("""
 **Logic Applied:**
 1. **Shopee**: Status='Perlu Dikirim' | Resi=Blank | Managed='No' | Kurir=Instant(Kamus).
 2. **Tokopedia**: Status='Perlu Dikirim'.
-3. **Fitur**: Prioritas baca file Excel (.xlsx).
+3. **SKU Logic**: Prefix **FG-** & **CS-** dipertahankan, sisanya ambil suffix.
 """)
 
-# --- FUNGSI CLEANING SKU ---
+# --- FUNGSI CLEANING SKU (UPDATED) ---
 def clean_sku(sku):
-    """Ambil bagian kanan hyphen, hapus spasi/karakter aneh."""
+    """
+    Logic:
+    1. Jika awalan 'FG-' atau 'CS-', biarkan apa adanya (hanya trim spasi).
+    2. Jika tidak, ambil bagian kanan setelah hyphen (-).
+    """
     if pd.isna(sku): return ""
     sku = str(sku).strip()
+    # Hapus karakter aneh (non-printable)
     sku = ''.join(char for char in sku if ord(char) >= 32)
+    
+    sku_upper = sku.upper()
+    
+    # KECUALIAN: FG- dan CS- jangan dipotong
+    if sku_upper.startswith('FG-') or sku_upper.startswith('CS-'):
+        return sku
+        
+    # Logic Default: Ambil kanan
     if '-' in sku:
         return sku.split('-', 1)[-1].strip()
+        
     return sku
 
-# --- FUNGSI SMART LOADER (PRIORITAS EXCEL) ---
+# --- FUNGSI SMART LOADER (AGRESIVE SEPARATOR CHECK) ---
 def load_data_smart(file_obj):
     """
-    Mencoba membaca file. Prioritas: Excel -> CSV.
-    Lalu mencari baris header yang benar.
+    Mencoba membaca file dengan prioritas Excel -> CSV.
+    Otomatis cek separator (, ; \t) jika kolom cuma 1.
     """
     df = None
     filename = file_obj.name.lower()
     
-    # 1. COBA BACA FILE (RAW)
     try:
-        # Prioritas 1: Baca sebagai EXCEL (.xlsx)
-        # Kita paksa coba baca excel dulu karena user bilang datanya xlsx
-        try:
-            df = pd.read_excel(file_obj, dtype=str, header=None, engine='openpyxl')
-        except:
-            # Fallback: Jika gagal, mungkin itu CSV yang dinamai xlsx, atau CSV beneran
-            file_obj.seek(0)
+        # A. COBA BACA EXCEL
+        if filename.endswith('.xlsx') or filename.endswith('.xls'):
             try:
-                df = pd.read_csv(file_obj, dtype=str, header=None) # Coba UTF-8
+                df = pd.read_excel(file_obj, dtype=str, header=None, engine='openpyxl')
             except:
-                file_obj.seek(0)
-                df = pd.read_csv(file_obj, sep=';', dtype=str, header=None) # Coba Separator ;
-                
+                pass # Lanjut ke CSV loader jika gagal (kadang file csv dinamai xlsx)
+
+        # B. COBA BACA CSV (Jika Excel gagal atau file .csv)
+        if df is None:
+            file_obj.seek(0)
+            # List kemungkinan separator
+            separators = [',', ';', '\t']
+            
+            for sep in separators:
+                try:
+                    file_obj.seek(0)
+                    temp_df = pd.read_csv(file_obj, sep=sep, dtype=str, header=None, encoding='utf-8')
+                    
+                    # Cek: Apakah kolom lebih dari 1?
+                    if temp_df.shape[1] > 1:
+                        df = temp_df
+                        break # Ketemu separator yang benar
+                except:
+                    # Coba encoding latin-1 jika utf-8 gagal
+                    try:
+                        file_obj.seek(0)
+                        temp_df = pd.read_csv(file_obj, sep=sep, dtype=str, header=None, encoding='latin-1')
+                        if temp_df.shape[1] > 1:
+                            df = temp_df
+                            break
+                    except:
+                        continue
+
     except Exception as e:
-        return None, f"Gagal membaca fisik file. Pastikan format .xlsx valid: {e}"
+        return None, f"Gagal membaca fisik file: {e}"
 
     if df is None or df.empty:
-        return None, "File kosong atau rusak."
+        return None, "File kosong atau format tidak dikenali (bukan Excel/CSV valid)."
 
-    # 2. CARI BARIS HEADER SEBENARNYA (Anti-Sampah)
-    # Kita cari baris yang mengandung keyword kolom marketplace
+    # 2. CARI BARIS HEADER SEBENARNYA
     header_idx = -1
     keywords = ['status pesanan', 'order status', 'no. pesanan', 'order id', 'seller sku']
     
     # Scan 20 baris pertama
     for i, row in df.head(20).iterrows():
-        # Gabungkan isi baris jadi satu string lowercase untuk pengecekan
         row_str = " ".join([str(val).lower() for val in row.values])
         if any(kw in row_str for kw in keywords):
             header_idx = i
             break
     
     if header_idx == -1:
-        # Fallback: Jika tidak ketemu keyword, asumsikan baris pertama adalah header
+        # Fallback terakhir: Baris 0
         header_idx = 0
 
     # 3. SET HEADER & BERSIHKAN
@@ -80,6 +111,11 @@ def load_data_smart(file_obj):
         
         # Bersihkan nama kolom (hapus spasi depan/belakang/enter)
         df_final.columns = df_final.columns.astype(str).str.replace('\n', ' ').str.strip()
+        
+        # DEBUG: Jika kolom 'Order Status' masih belum ketemu, print kolom yang ada
+        # if 'Order Status' not in df_final.columns and 'Status Pesanan' not in df_final.columns:
+        #     return None, f"Kolom Status tidak ditemukan. Header terbaca: {list(df_final.columns)}"
+            
         return df_final, None
     except Exception as e:
         return None, f"Error saat set header: {e}"
@@ -96,7 +132,7 @@ def process_universal_data(uploaded_files, kamus_data):
         df_bundle = kamus_data['bundle']
         df_sku = kamus_data['sku']
 
-        # A. Mapping Bundle (Kit_Sku -> List Component)
+        # A. Mapping Bundle
         bundle_map = {}
         for _, row in df_bundle.iterrows():
             cols = {c.lower(): c for c in df_bundle.columns}
@@ -108,7 +144,6 @@ def process_universal_data(uploaded_files, kamus_data):
                 kit_val = clean_sku(row[kit_c])
                 comp_val = clean_sku(row[comp_c])
                 try:
-                    # Handle qty desimal (koma jadi titik)
                     qty_val = float(str(row[qty_c]).replace(',', '.')) if qty_c else 1.0
                 except:
                     qty_val = 1.0
@@ -117,11 +152,11 @@ def process_universal_data(uploaded_files, kamus_data):
                     if kit_val not in bundle_map: bundle_map[kit_val] = []
                     bundle_map[kit_val].append((comp_val, qty_val))
 
-        # B. Mapping SKU Name (Kolom B -> Kolom C)
+        # B. Mapping SKU Name
         sku_name_map = {}
         if len(df_sku.columns) >= 2:
-            idx_code = 1 if len(df_sku.columns) > 2 else 0 # Ambil Kolom ke-2 (B)
-            idx_name = 2 if len(df_sku.columns) > 2 else 1 # Ambil Kolom ke-3 (C)
+            idx_code = 1 if len(df_sku.columns) > 2 else 0 
+            idx_name = 2 if len(df_sku.columns) > 2 else 1 
             
             for _, row in df_sku.iterrows():
                 try:
@@ -146,10 +181,9 @@ def process_universal_data(uploaded_files, kamus_data):
 
     # 2. LOOP SETIAP FILE ORDER
     for mp_type, file_obj in uploaded_files:
-        # Load dengan Smart Loader (Prioritas Excel)
         df_raw, err = load_data_smart(file_obj)
         if err:
-            st.error(f"File {mp_type} ({file_obj.name}) Gagal: {err}")
+            st.error(f"File {mp_type} Gagal: {err}")
             continue
             
         df_filtered = pd.DataFrame()
@@ -157,10 +191,6 @@ def process_universal_data(uploaded_files, kamus_data):
         
         # --- LOGIC SHOPEE ---
         if mp_type == 'Shopee':
-            # Cek Kolom Wajib (Case insensitive search)
-            raw_cols_lower = [c.lower() for c in df_raw.columns]
-            
-            # Cari nama kolom yang tepat
             status_c = next((c for c in df_raw.columns if 'status' in c.lower()), None)
             managed_c = next((c for c in df_raw.columns if 'dikelola' in c.lower()), None)
             resi_c = next((c for c in df_raw.columns if 'resi' in c.lower()), None)
@@ -170,13 +200,9 @@ def process_universal_data(uploaded_files, kamus_data):
                 st.error(f"Shopee: Kolom tidak lengkap. Terbaca: {list(df_raw.columns)}")
                 continue
 
-            # Filter 1: Status Perlu Dikirim
             c1 = df_raw[status_c].astype(str).str.strip() == 'Perlu Dikirim'
-            # Filter 2: Managed No
             c2 = df_raw[managed_c].astype(str).str.strip().str.lower() == 'no'
-            # Filter 3: Resi Kosong
             c3 = df_raw[resi_c].isna() | (df_raw[resi_c].astype(str).str.strip() == '') | (df_raw[resi_c].astype(str).str.lower() == 'nan')
-            # Filter 4: Kurir Instant (Kamus)
             c4 = df_raw[kurir_c].isin(instant_list)
             
             df_filtered = df_raw[c1 & c2 & c3 & c4].copy()
@@ -187,14 +213,14 @@ def process_universal_data(uploaded_files, kamus_data):
 
         # --- LOGIC TOKOPEDIA ---
         elif mp_type == 'Tokopedia':
-            # Cari kolom fleksibel
             status_col = next((c for c in df_raw.columns if 'status' in c.lower()), None)
             
             if not status_col:
-                st.error(f"Tokopedia: Kolom 'Order Status' tidak ditemukan. Header terbaca: {list(df_raw.columns)}")
+                # Fallback: jika status_col None, kemungkinan header salah.
+                st.error(f"Tokopedia: Kolom 'Order Status' tidak ditemukan. Header: {list(df_raw.columns)}")
                 continue
 
-            # FILTER: HANYA Status "Perlu dikirim" (Case insensitive)
+            # Filter: HANYA Status "Perlu dikirim"
             df_filtered = df_raw[
                 df_raw[status_col].astype(str).str.strip().str.lower() == 'perlu dikirim'
             ].copy()
@@ -211,7 +237,6 @@ def process_universal_data(uploaded_files, kamus_data):
             raw_sku = str(row.get(col_sku, ''))
             sku_clean = clean_sku(raw_sku)
             
-            # Handle Qty (aman dari koma/string)
             try:
                 q_val = str(row.get(col_qty, 0)).replace(',', '.')
                 qty_order = float(q_val)
@@ -220,7 +245,6 @@ def process_universal_data(uploaded_files, kamus_data):
 
             # Logic Bundle
             if sku_clean in bundle_map:
-                # IS BUNDLE -> Expand rows
                 for comp_sku, comp_qty_unit in bundle_map[sku_clean]:
                     all_rows.append({
                         'Marketplace': mp_type,
@@ -228,18 +252,17 @@ def process_universal_data(uploaded_files, kamus_data):
                         'SKU Original': raw_sku,
                         'Is Bundle?': 'Yes',
                         'SKU Component': comp_sku,
-                        'Nama Produk': sku_name_map.get(comp_sku, comp_sku), # Lookup Nama
+                        'Nama Produk': sku_name_map.get(comp_sku, comp_sku),
                         'Qty Total': qty_order * comp_qty_unit
                     })
             else:
-                # IS SINGLE
                 all_rows.append({
                     'Marketplace': mp_type,
                     'Order ID': row.get(col_ord, ''),
                     'SKU Original': raw_sku,
                     'Is Bundle?': 'No',
                     'SKU Component': sku_clean,
-                    'Nama Produk': sku_name_map.get(sku_clean, sku_clean), # Lookup Nama
+                    'Nama Produk': sku_name_map.get(sku_clean, sku_clean),
                     'Qty Total': qty_order
                 })
 
@@ -248,12 +271,9 @@ def process_universal_data(uploaded_files, kamus_data):
 
     # 4. FINAL AGGREGATION
     df_detail = pd.DataFrame(all_rows)
-    
-    # Sortir kolom biar rapi
-    cols_display = ['Marketplace', 'Order ID', 'SKU Original', 'Is Bundle?', 'SKU Component', 'Nama Produk', 'Qty Total']
-    # Filter kolom yg ada aja
-    final_cols = [c for c in cols_display if c in df_detail.columns]
-    df_detail = df_detail[final_cols]
+    cols_order = ['Marketplace', 'Order ID', 'SKU Original', 'Is Bundle?', 'SKU Component', 'Nama Produk', 'Qty Total']
+    # Reorder columns if possible
+    df_detail = df_detail.reindex(columns=[c for c in cols_order if c in df_detail.columns] + [c for c in df_detail.columns if c not in cols_order])
 
     df_summary = df_detail.groupby(['Marketplace', 'SKU Component', 'Nama Produk']).agg({
         'Qty Total': 'sum'
@@ -265,9 +285,15 @@ def process_universal_data(uploaded_files, kamus_data):
 st.sidebar.header("📁 1. Upload Kamus (Wajib)")
 kamus_f = st.sidebar.file_uploader("Kamus Dashboard.xlsx", type=['xlsx'])
 
-st.sidebar.header("📁 2. Upload Order (Excel/CSV)")
+st.sidebar.header("📁 2. Upload Order")
 shp_f = st.sidebar.file_uploader("Order Shopee", type=['xlsx', 'csv'])
 tok_f = st.sidebar.file_uploader("Order Tokopedia", type=['xlsx', 'csv'])
+
+# --- LOGIC RESET DASHBOARD ---
+# Jika file dihapus (None), hapus hasil dari session state
+if not shp_f and not tok_f:
+    if 'result' in st.session_state:
+        del st.session_state['result']
 
 if st.sidebar.button("🚀 PROSES DATA"):
     if not kamus_f:
