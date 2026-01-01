@@ -23,15 +23,9 @@ def explode_bundle(df, sku_col, qty_col, bundle_df):
     df = df.copy()
     df["Clean_SKU"] = df[sku_col].apply(clean_sku_for_lookup)
 
-    bundle_map = bundle_df.rename(columns={
-        "Kit_Sku": "Clean_SKU"
-    })
+    bundle_map = bundle_df.rename(columns={"Kit_Sku": "Clean_SKU"})
 
-    merged = df.merge(
-        bundle_map,
-        on="Clean_SKU",
-        how="left"
-    )
+    merged = df.merge(bundle_map, on="Clean_SKU", how="left")
 
     is_bundle = merged["Component_Sku"].notna()
 
@@ -43,8 +37,7 @@ def explode_bundle(df, sku_col, qty_col, bundle_df):
     single["Final SKU"] = single[sku_col]
     single["Qty"] = single[qty_col]
 
-    final = pd.concat([exploded, single], ignore_index=True)
-    return final
+    return pd.concat([exploded, single], ignore_index=True)
 
 def safe_filter(df, column, value):
     if column in df.columns:
@@ -52,33 +45,14 @@ def safe_filter(df, column, value):
     return df
 
 # ======================================================
-# LOAD KAMUS DASHBOARD
+# SIDEBAR UPLOAD
 # ======================================================
-@st.cache_data
-def load_kamus():
-    kamus = pd.ExcelFile("Kamus Dashboard.xlsx")
+st.sidebar.header("Upload File")
 
-    bundle_master = pd.read_excel(kamus, "Bundle Master")
-    sku_master = pd.read_excel(kamus, "SKU Master")
-
-    bundle_master = normalize_columns(bundle_master)
-    sku_master = normalize_columns(sku_master)
-
-    return bundle_master, sku_master
-
-bundle_master, sku_master = load_kamus()
-
-sku_lookup = dict(
-    zip(
-        sku_master["Product_Sku"].astype(str),
-        sku_master["Product_Name"]
-    )
+kamus_file = st.sidebar.file_uploader(
+    "Upload Kamus Dashboard.xlsx",
+    type=["xlsx"]
 )
-
-# ======================================================
-# SIDEBAR INPUT
-# ======================================================
-st.sidebar.header("Upload Report")
 
 shopee_file = st.sidebar.file_uploader(
     "Upload Shopee Order Report",
@@ -91,11 +65,32 @@ tokped_file = st.sidebar.file_uploader(
 )
 
 # ======================================================
+# LOAD KAMUS
+# ======================================================
+@st.cache_data
+def load_kamus(file):
+    xls = pd.ExcelFile(file)
+    bundle = normalize_columns(pd.read_excel(xls, "Bundle Master"))
+    sku = normalize_columns(pd.read_excel(xls, "SKU Master"))
+    return bundle, sku
+
+if kamus_file:
+    bundle_master, sku_master = load_kamus(kamus_file)
+    sku_lookup = dict(
+        zip(
+            sku_master["Product_Sku"].astype(str),
+            sku_master["Product_Name"]
+        )
+    )
+else:
+    st.warning("Upload Kamus Dashboard terlebih dahulu")
+    st.stop()
+
+# ======================================================
 # PROCESS SHOPEE
 # ======================================================
 def process_shopee(file):
-    df = pd.read_excel(file)
-    df = normalize_columns(df)
+    df = normalize_columns(pd.read_excel(file))
 
     df = safe_filter(df, "Pesanan yang Dikelola Shopee", "No")
 
@@ -121,8 +116,7 @@ def process_shopee(file):
 # PROCESS TOKOPEDIA
 # ======================================================
 def process_tokped(file):
-    df = pd.read_excel(file)
-    df = normalize_columns(df)
+    df = normalize_columns(pd.read_excel(file))
 
     df = safe_filter(df, "Order Status", "Perlu dikirim")
 
@@ -142,67 +136,39 @@ def process_tokped(file):
     return df
 
 # ======================================================
-# MAIN
+# DASHBOARD
 # ======================================================
-tabs = st.tabs([
-    "Shopee Report",
-    "Tokopedia Report",
-    "Rekap Final"
-])
+tabs = st.tabs(["Shopee", "Tokopedia", "Rekap Final"])
 
 with tabs[0]:
     if shopee_file:
         shopee_df = process_shopee(shopee_file)
-
         report = (
             shopee_df
             .groupby(["Final SKU", "Product Name"], as_index=False)["Qty"]
             .sum()
             .sort_values("Qty", ascending=False)
         )
-
         st.dataframe(report, use_container_width=True)
-
-        st.download_button(
-            "Download Shopee CSV",
-            report.to_csv(index=False),
-            "shopee_final.csv"
-        )
 
 with tabs[1]:
     if tokped_file:
         tokped_df = process_tokped(tokped_file)
-
         report = (
             tokped_df
             .groupby(["Final SKU", "Product Name"], as_index=False)["Qty"]
             .sum()
             .sort_values("Qty", ascending=False)
         )
-
         st.dataframe(report, use_container_width=True)
-
-        st.download_button(
-            "Download Tokopedia CSV",
-            report.to_csv(index=False),
-            "tokopedia_final.csv"
-        )
 
 with tabs[2]:
     if shopee_file and tokped_file:
-        combined = pd.concat([shopee_df, tokped_df], ignore_index=True)
-
-        final = (
-            combined
+        final = pd.concat([shopee_df, tokped_df])
+        report = (
+            final
             .groupby(["Final SKU", "Product Name"], as_index=False)["Qty"]
             .sum()
             .sort_values("Qty", ascending=False)
         )
-
-        st.dataframe(final, use_container_width=True)
-
-        st.download_button(
-            "Download Rekap Final CSV",
-            final.to_csv(index=False),
-            "rekap_final.csv"
-        )
+        st.dataframe(report, use_container_width=True)
