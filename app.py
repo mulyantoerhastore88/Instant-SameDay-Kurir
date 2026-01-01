@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import io
 import time
-import chardet
 from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
@@ -46,22 +45,31 @@ def clean_sku(sku):
         
     return sku
 
-# --- FUNGSI DETEKSI ENCODING ---
-def detect_encoding(file_obj):
-    """Deteksi encoding file"""
+# --- FUNGSI DETEKSI ENCODING SEDERHANA ---
+def detect_simple_encoding(file_obj):
+    """Deteksi encoding file secara sederhana"""
+    file_obj.seek(0)
     sample = file_obj.read(10000)
     file_obj.seek(0)
-    result = chardet.detect(sample)
-    encoding = result['encoding']
-    if DEBUG_MODE:
-        st.sidebar.info(f"Detected encoding: {encoding} (confidence: {result['confidence']:.2f})")
-    return encoding
+    
+    # Cek BOM untuk UTF-8
+    if sample.startswith(b'\xef\xbb\xbf'):
+        return 'utf-8-sig'
+    
+    # Coba decode dengan UTF-8 dulu
+    try:
+        sample.decode('utf-8')
+        return 'utf-8'
+    except:
+        pass
+    
+    # Default ke latin-1 (selalu berhasil)
+    return 'latin-1'
 
-# --- FUNGSI SMART LOADER (AGRESIVE SEPARATOR CHECK) ---
+# --- FUNGSI SMART LOADER ---
 def load_data_smart(file_obj):
     """
     Mencoba membaca file dengan prioritas Excel -> CSV.
-    Otomatis cek separator (, ; \t) jika kolom cuma 1.
     """
     df = None
     filename = file_obj.name.lower()
@@ -74,31 +82,20 @@ def load_data_smart(file_obj):
         # A. COBA BACA EXCEL
         if filename.endswith('.xlsx') or filename.endswith('.xls'):
             try:
-                # Coba baca semua sheet pertama
                 df = pd.read_excel(file_obj, dtype=str, header=None, engine='openpyxl')
                 if DEBUG_MODE:
                     st.sidebar.success(f"✓ Excel loaded: {df.shape[0]} rows, {df.shape[1]} cols")
-                    st.sidebar.text(f"First row: {df.iloc[0].tolist()[:5]}")
             except Exception as e:
                 if DEBUG_MODE:
                     st.sidebar.warning(f"Excel failed: {str(e)[:100]}")
                 df = None
 
-        # B. COBA BACA CSV (Jika Excel gagal atau file .csv)
+        # B. COBA BACA CSV
         if df is None or df.shape[1] <= 1:
             file_obj.seek(0)
             
-            # Deteksi encoding
-            try:
-                encoding = detect_encoding(file_obj)
-            except:
-                encoding = 'utf-8'
-            
-            # Prioritaskan UTF-8 dengan BOM untuk Tokopedia
+            # Encoding yang akan dicoba (prioritas untuk Indonesia)
             encodings_to_try = ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
-            if encoding and encoding not in encodings_to_try:
-                encodings_to_try.insert(0, encoding)
-            
             separators = [',', ';', '\t', '|']
             
             for enc in encodings_to_try:
@@ -119,16 +116,13 @@ def load_data_smart(file_obj):
                             skipinitialspace=True
                         )
                         
-                        # Cek: Apakah kolom lebih dari 1?
                         if temp_df.shape[1] > 1:
                             df = temp_df
                             if DEBUG_MODE:
                                 st.sidebar.success(f"✓ CSV loaded: encoding={enc}, separator='{sep}'")
                                 st.sidebar.text(f"Shape: {df.shape}")
                             break
-                    except Exception as e:
-                        if DEBUG_MODE and enc == encodings_to_try[0]:
-                            st.sidebar.text(f"Failed: {enc}/{sep} - {str(e)[:50]}")
+                    except:
                         continue
                 
                 if df is not None and df.shape[1] > 1:
@@ -141,12 +135,11 @@ def load_data_smart(file_obj):
         return None, "File kosong atau format tidak dikenali."
 
     if DEBUG_MODE:
-        st.sidebar.text(f"Raw data shape before header detection: {df.shape}")
+        st.sidebar.text(f"Raw data shape: {df.shape}")
 
-    # 2. CARI BARIS HEADER SEBENARNYA (TOKOPEDIA SPECIFIC)
+    # 2. CARI BARIS HEADER SEBENARNYA
     header_idx = -1
-    # Keywords khusus Tokopedia (case-insensitive)
-    keywords_tokopedia = [
+    keywords = [
         'order status', 'status pesanan',
         'seller sku', 'nomor sku',
         'order id', 'no. pesanan',
@@ -156,39 +149,34 @@ def load_data_smart(file_obj):
     
     # Tampilkan beberapa baris pertama untuk debug
     if DEBUG_MODE and df.shape[0] > 0:
-        st.sidebar.text("First 3 rows (raw):")
-        for i in range(min(3, df.shape[0])):
-            row_preview = " | ".join([str(x)[:30] for x in df.iloc[i].fillna('').tolist()[:5]])
+        st.sidebar.text("First 2 rows preview:")
+        for i in range(min(2, df.shape[0])):
+            row_preview = " | ".join([str(x)[:20] for x in df.iloc[i].fillna('').tolist()[:3]])
             st.sidebar.text(f"Row {i}: {row_preview}...")
     
-    # Scan 50 baris pertama (Tokopedia bisa punya metadata)
-    max_scan_rows = min(50, df.shape[0])
+    # Scan 30 baris pertama
+    max_scan_rows = min(30, df.shape[0])
     for i in range(max_scan_rows):
         row = df.iloc[i]
-        # Gabungkan semua nilai di baris menjadi string lowercase
         row_str = " ".join([str(val).lower().strip() if pd.notna(val) else '' for val in row.values])
         
-        # Hitung berapa keyword yang match
-        match_count = sum(1 for kw in keywords_tokopedia if kw in row_str)
+        match_count = sum(1 for kw in keywords if kw in row_str)
         
-        if match_count >= 2:  # Minimal 2 keyword yang match
+        if match_count >= 2:  # Minimal 2 keyword match
             header_idx = i
             if DEBUG_MODE:
                 st.sidebar.success(f"✅ Header ditemukan di baris {i+1}")
-                st.sidebar.text(f"Header content: {row_str[:100]}...")
             break
     
     if header_idx == -1:
         if DEBUG_MODE:
-            st.sidebar.warning("⚠️ Header tidak terdeteksi otomatis, menggunakan baris 0")
+            st.sidebar.warning("⚠️ Header tidak terdeteksi, menggunakan baris 0")
         header_idx = 0
 
     # 3. SET HEADER & BERSIHKAN
     try:
         df_final = df.iloc[header_idx:].copy()
-        df_final.columns = df_final.iloc[0]  # Jadikan baris ini nama kolom
-        
-        # Hapus baris header dari data
+        df_final.columns = df_final.iloc[0]
         df_final = df_final.iloc[1:].reset_index(drop=True)
         
         # Bersihkan nama kolom
@@ -198,19 +186,17 @@ def load_data_smart(file_obj):
             for i, col in enumerate(df_final.columns)
         ]
         
-        # Hapus baris kosong di awal
+        # Hapus baris kosong
         df_final = df_final.dropna(how='all').reset_index(drop=True)
         
         if DEBUG_MODE:
             st.sidebar.success(f"✅ Final shape: {df_final.shape}")
-            st.sidebar.text(f"Columns: {list(df_final.columns)[:10]}")
-            if len(df_final.columns) > 0:
-                st.sidebar.text(f"First row data: {df_final.iloc[0].to_dict()}")
+            st.sidebar.text(f"Columns ({len(df_final.columns)}): {list(df_final.columns)}")
         
         return df_final, None
         
     except Exception as e:
-        error_msg = f"Error saat set header (baris {header_idx}): {str(e)}"
+        error_msg = f"Error saat set header: {str(e)}"
         if DEBUG_MODE:
             st.sidebar.error(error_msg)
         return None, error_msg
@@ -233,20 +219,40 @@ def process_universal_data(uploaded_files, kamus_data):
         # A. Mapping Bundle
         bundle_map = {}
         for _, row in df_bundle.iterrows():
-            cols = {c.lower(): c for c in df_bundle.columns}
-            kit_c = cols.get('kit_sku') or cols.get('sku bundle') or cols.get('bundle')
-            comp_c = cols.get('component_sku') or cols.get('sku component') or cols.get('component')
-            qty_c = cols.get('component_qty') or cols.get('component quantity') or cols.get('qty')
-
-            if kit_c and comp_c:
-                kit_val = clean_sku(row[kit_c])
-                comp_val = clean_sku(row[comp_c])
+            # Cari kolom yang cocok
+            col_dict = {str(col).lower(): col for col in df_bundle.columns}
+            
+            # Cari kolom kit/bundle
+            kit_col = None
+            for key in ['kit_sku', 'sku bundle', 'bundle', 'parent']:
+                if key in col_dict:
+                    kit_col = col_dict[key]
+                    break
+            
+            # Cari kolom component
+            comp_col = None
+            for key in ['component_sku', 'sku component', 'component', 'child']:
+                if key in col_dict:
+                    comp_col = col_dict[key]
+                    break
+            
+            # Cari kolom quantity
+            qty_col = None
+            for key in ['component_qty', 'component quantity', 'qty', 'quantity']:
+                if key in col_dict:
+                    qty_col = col_dict[key]
+                    break
+            
+            if kit_col and comp_col and kit_col in df_bundle.columns and comp_col in df_bundle.columns:
+                kit_val = clean_sku(row[kit_col])
+                comp_val = clean_sku(row[comp_col])
+                
                 try:
-                    qty_val = float(str(row[qty_c]).replace(',', '.')) if qty_c else 1.0
+                    qty_val = float(str(row[qty_col]).replace(',', '.')) if qty_col and pd.notna(row[qty_col]) else 1.0
                 except:
                     qty_val = 1.0
                 
-                if kit_val:
+                if kit_val and comp_val:
                     if kit_val not in bundle_map: 
                         bundle_map[kit_val] = []
                     bundle_map[kit_val].append((comp_val, qty_val))
@@ -256,15 +262,23 @@ def process_universal_data(uploaded_files, kamus_data):
 
         # B. Mapping SKU Name
         sku_name_map = {}
-        if len(df_sku.columns) >= 2:
-            idx_code = 1 if len(df_sku.columns) > 2 else 0 
-            idx_name = 2 if len(df_sku.columns) > 2 else 1 
-            
+        if not df_sku.empty and len(df_sku.columns) >= 2:
+            # Asumsi kolom 0 atau 1 adalah SKU, kolom terakhir atau ke-2 adalah nama
             for _, row in df_sku.iterrows():
                 try:
-                    code = clean_sku(row.iloc[idx_code])
-                    name = str(row.iloc[idx_name])
-                    if code and pd.notna(name): 
+                    # Coba ambil dari kolom pertama yang tidak kosong
+                    code = None
+                    name = None
+                    
+                    for idx, val in enumerate(row):
+                        if pd.notna(val) and str(val).strip():
+                            if code is None:
+                                code = clean_sku(val)
+                            elif name is None:
+                                name = str(val).strip()
+                                break
+                    
+                    if code and name:
                         sku_name_map[code] = name
                 except:
                     continue
@@ -274,11 +288,21 @@ def process_universal_data(uploaded_files, kamus_data):
 
         # C. List Kurir Instant Shopee
         instant_list = []
-        if 'Instant/Same Day' in df_kurir.columns:
-            k_col = df_kurir.columns[0]
-            instant_list = df_kurir[
-                df_kurir['Instant/Same Day'].astype(str).str.strip().str.lower().isin(['yes', 'ya', 'true', '1'])
-            ][k_col].astype(str).str.strip().tolist()
+        if not df_kurir.empty:
+            # Cari kolom Instant/Same Day
+            instant_col = None
+            for col in df_kurir.columns:
+                if 'instant' in str(col).lower() or 'same' in str(col).lower():
+                    instant_col = col
+                    break
+            
+            # Cari kolom nama kurir (biasanya kolom pertama)
+            kurir_col = df_kurir.columns[0] if len(df_kurir.columns) > 0 else None
+            
+            if instant_col and kurir_col:
+                instant_list = df_kurir[
+                    df_kurir[instant_col].astype(str).str.strip().str.lower().isin(['yes', 'ya', 'true', '1', 'y'])
+                ][kurir_col].astype(str).str.strip().tolist()
             
         if DEBUG_MODE:
             st.sidebar.info(f"Instant couriers: {len(instant_list)} entries")
@@ -303,149 +327,98 @@ def process_universal_data(uploaded_files, kamus_data):
             continue
             
         df_filtered = pd.DataFrame()
-        col_sku, col_qty, col_ord = '', '', ''
         
         # --- LOGIC SHOPEE ---
         if mp_type == 'Shopee':
-            # Normalize column names
             df_raw.columns = [str(col).strip().lower() for col in df_raw.columns]
             
             status_c = next((c for c in df_raw.columns if 'status' in c), None)
             managed_c = next((c for c in df_raw.columns if 'dikelola' in c), None)
             resi_c = next((c for c in df_raw.columns if 'resi' in c), None)
-            kurir_c = next((c for c in df_raw.columns if 'opsi' in c or 'kirim' in c), None)
+            kurir_c = next((c for c in df_raw.columns if any(x in c for x in ['opsi', 'kirim', 'kurir'])), None)
             
             if DEBUG_MODE:
-                st.sidebar.text(f"Shopee columns found: Status={status_c}, Managed={managed_c}, Resi={resi_c}, Kurir={kurir_c}")
-                if status_c:
-                    st.sidebar.text(f"Status unique: {df_raw[status_c].astype(str).str.strip().unique()[:10]}")
+                st.sidebar.text(f"Shopee columns: {list(df_raw.columns)[:10]}")
             
             if not all([status_c, managed_c, resi_c, kurir_c]):
-                st.error(f"Shopee: Kolom tidak lengkap. Terbaca: {list(df_raw.columns)}")
+                st.error(f"Shopee: Kolom tidak lengkap")
                 continue
 
             try:
                 c1 = df_raw[status_c].astype(str).str.strip() == 'Perlu Dikirim'
                 c2 = df_raw[managed_c].astype(str).str.strip().str.lower() == 'no'
-                c3 = df_raw[resi_c].fillna('').astype(str).str.strip().isin(['', 'nan', 'None'])
+                c3 = df_raw[resi_c].fillna('').astype(str).str.strip().isin(['', 'nan', 'none'])
                 c4 = df_raw[kurir_c].astype(str).str.strip().isin(instant_list)
                 
                 df_filtered = df_raw[c1 & c2 & c3 & c4].copy()
                 
                 if DEBUG_MODE:
-                    st.sidebar.text(f"Shopee filtered: {len(df_raw)} → {len(df_filtered)} rows")
+                    st.sidebar.text(f"Shopee filter: {len(df_raw)} → {len(df_filtered)} rows")
             except Exception as e:
                 st.error(f"Shopee filter error: {e}")
                 continue
             
-            col_sku = next((c for c in df_raw.columns if 'sku' in c and 'referensi' in c), None)
+            # Tentukan kolom SKU
+            col_sku = next((c for c in df_raw.columns if 'sku' in c), None)
             if not col_sku:
-                col_sku = next((c for c in df_raw.columns if 'sku' in c), 'Nomor Referensi SKU')
-                
-            col_qty = next((c for c in df_raw.columns if 'jumlah' in c), 'Jumlah')
-            col_ord = next((c for c in df_raw.columns if 'pesanan' in c), 'No. Pesanan')
+                col_sku = df_raw.columns[0] if len(df_raw.columns) > 0 else 'SKU'
+            
+            col_qty = next((c for c in df_raw.columns if 'jumlah' in c), None)
+            if not col_qty:
+                col_qty = df_raw.columns[1] if len(df_raw.columns) > 1 else 'Qty'
+            
+            col_ord = next((c for c in df_raw.columns if 'pesanan' in c), None)
+            if not col_ord:
+                col_ord = df_raw.columns[2] if len(df_raw.columns) > 2 else 'OrderID'
 
-        # --- LOGIC TOKOPEDIA (UPGRADED) ---
+        # --- LOGIC TOKOPEDIA ---
         elif mp_type == 'Tokopedia':
-            # Normalize column names (keep original for display, but have lowercase version)
-            col_map = {str(col).strip(): col for col in df_raw.columns}
-            col_lower_map = {str(col).strip().lower(): col for col in df_raw.columns}
-            
             if DEBUG_MODE:
-                st.sidebar.text(f"Tokopedia columns: {list(df_raw.columns)[:10]}")
+                st.sidebar.text(f"Tokopedia columns: {list(df_raw.columns)}")
             
-            # Cari kolom status dengan beberapa kemungkinan
+            # Cari kolom status
             status_col = None
-            status_keywords = ['order status', 'status pesanan', 'status']
-            
-            for keyword in status_keywords:
-                # Coba exact match (case-insensitive)
-                for col in df_raw.columns:
-                    if str(col).strip().lower() == keyword.lower():
-                        status_col = col
-                        break
-                if status_col:
+            for col in df_raw.columns:
+                col_lower = str(col).lower()
+                if 'status' in col_lower:
+                    status_col = col
                     break
             
-            # Fallback: cari partial match
             if not status_col:
-                for col in df_raw.columns:
-                    col_lower = str(col).lower()
-                    if any(kw in col_lower for kw in ['status', 'order']):
-                        status_col = col
-                        break
-            
-            if not status_col:
-                st.error(f"🚨 Tokopedia: Kolom Status TIDAK DITEMUKAN!")
-                st.error(f"Daftar kolom: {list(df_raw.columns)}")
+                st.error(f"Tokopedia: Kolom Status tidak ditemukan")
+                st.error(f"Kolom yang ada: {list(df_raw.columns)}")
                 continue
             
             if DEBUG_MODE:
-                st.sidebar.success(f"✅ Status column found: {status_col}")
-                unique_status = df_raw[status_col].astype(str).str.strip().str.lower().unique()[:10]
-                st.sidebar.text(f"Status values: {unique_status}")
+                st.sidebar.success(f"Status column: {status_col}")
+                unique_vals = df_raw[status_col].astype(str).str.strip().unique()[:5]
+                st.sidebar.text(f"Sample status: {unique_vals}")
             
-            # Filter: Status "Perlu dikirim" (case-insensitive)
+            # Filter status
             df_filtered = df_raw[
                 df_raw[status_col].astype(str).str.strip().str.lower() == 'perlu dikirim'
             ].copy()
             
             if DEBUG_MODE:
-                st.sidebar.info(f"Tokopedia filter: {len(df_raw)} → {len(df_filtered)} rows")
-                if len(df_filtered) == 0:
-                    st.sidebar.warning("⚠️ 0 rows after filtering!")
-                    # Show sample of status values
-                    sample_status = df_raw[status_col].astype(str).str.strip().unique()[:20]
-                    st.sidebar.text(f"Sample status values: {sample_status}")
+                st.sidebar.text(f"Tokopedia filter: {len(df_raw)} → {len(df_filtered)} rows")
             
-            # Tentukan kolom SKU
-            sku_keywords = ['seller sku', 'nomor sku', 'sku']
+            # Tentukan kolom lainnya
             col_sku = None
-            for keyword in sku_keywords:
-                for col in df_raw.columns:
-                    if str(col).strip().lower() == keyword.lower():
-                        col_sku = col
-                        break
-                if col_sku:
+            for col in df_raw.columns:
+                col_lower = str(col).lower()
+                if 'seller' in col_lower and 'sku' in col_lower:
+                    col_sku = col
                     break
-            
             if not col_sku:
-                col_sku = 'Seller SKU'
+                col_sku = next((c for c in df_raw.columns if 'sku' in str(c).lower()), 'Seller SKU')
             
-            # Tentukan kolom Quantity
-            qty_keywords = ['quantity', 'jumlah']
-            col_qty = None
-            for keyword in qty_keywords:
-                for col in df_raw.columns:
-                    if str(col).strip().lower() == keyword.lower():
-                        col_qty = col
-                        break
-                if col_qty:
-                    break
-            
-            if not col_qty:
-                col_qty = 'Quantity'
-            
-            # Tentukan kolom Order ID
-            order_keywords = ['order id', 'orderid', 'invoice', 'pesanan']
-            col_ord = None
-            for keyword in order_keywords:
-                for col in df_raw.columns:
-                    if str(col).strip().lower() == keyword.lower():
-                        col_ord = col
-                        break
-                if col_ord:
-                    break
-            
-            if not col_ord:
-                col_ord = 'Order ID'
+            col_qty = next((c for c in df_raw.columns if any(x in str(c).lower() for x in ['quantity', 'jumlah'])), 'Quantity')
+            col_ord = next((c for c in df_raw.columns if any(x in str(c).lower() for x in ['order', 'invoice', 'pesanan'])), 'Order ID')
             
             if DEBUG_MODE:
                 st.sidebar.info(f"Mapping: SKU={col_sku}, Qty={col_qty}, Order={col_ord}")
-                if col_sku in df_filtered.columns and not df_filtered.empty:
-                    st.sidebar.text(f"SKU sample: {df_filtered[col_sku].iloc[0] if len(df_filtered) > 0 else 'N/A'}")
 
-        # 3. EXPANSION (BUNDLE -> COMPONENT)
+        # 3. PROSES DATA FILTERED
         if df_filtered.empty:
             if DEBUG_MODE:
                 st.sidebar.warning(f"⚠️ {mp_type}: No data after filtering")
@@ -453,16 +426,16 @@ def process_universal_data(uploaded_files, kamus_data):
         
         rows_processed = 0
         for idx, row in df_filtered.iterrows():
-            # Get SKU value safely
+            # Ambil SKU
             raw_sku = ''
-            if col_sku and col_sku in row:
-                raw_sku = str(row[col_sku]) if pd.notna(row[col_sku]) else ''
+            if col_sku in row and pd.notna(row[col_sku]):
+                raw_sku = str(row[col_sku])
             
             sku_clean = clean_sku(raw_sku)
             
-            # Get quantity safely
+            # Ambil Qty
             try:
-                if col_qty and col_qty in row and pd.notna(row[col_qty]):
+                if col_qty in row and pd.notna(row[col_qty]):
                     q_val = str(row[col_qty]).replace(',', '.')
                     qty_order = float(q_val)
                 else:
@@ -470,15 +443,19 @@ def process_universal_data(uploaded_files, kamus_data):
             except:
                 qty_order = 0
             
-            # Get Order ID safely
+            # Ambil Order ID
             order_id = ''
-            if col_ord and col_ord in row and pd.notna(row[col_ord]):
+            if col_ord in row and pd.notna(row[col_ord]):
                 order_id = str(row[col_ord])
             
-            # Logic Bundle
-            if sku_clean and sku_clean in bundle_map:
+            # Skip jika SKU kosong
+            if not sku_clean:
+                continue
+            
+            # Bundle logic
+            if sku_clean in bundle_map:
                 for comp_sku, comp_qty_unit in bundle_map[sku_clean]:
-                    if comp_sku:  # Skip empty component SKU
+                    if comp_sku:
                         all_rows.append({
                             'Marketplace': mp_type,
                             'Order ID': order_id,
@@ -489,7 +466,7 @@ def process_universal_data(uploaded_files, kamus_data):
                             'Qty Total': qty_order * comp_qty_unit
                         })
                         rows_processed += 1
-            elif sku_clean:  # Regular SKU
+            else:
                 all_rows.append({
                     'Marketplace': mp_type,
                     'Order ID': order_id,
@@ -505,95 +482,83 @@ def process_universal_data(uploaded_files, kamus_data):
             st.sidebar.success(f"✅ {mp_type}: {rows_processed} rows processed")
 
     if not all_rows:
-        return None, "Data terbaca tapi 0 lolos filter. Cek kembali Status/Kurir/Resi di file order."
+        return None, "Data terbaca tapi 0 lolos filter. Cek Status/Kurir/Resi di file order."
 
     # 4. FINAL AGGREGATION
     try:
         df_detail = pd.DataFrame(all_rows)
         
-        # Ensure required columns exist
-        for col in ['Marketplace', 'Order ID', 'SKU Original', 'Is Bundle?', 'SKU Component', 'Nama Produk', 'Qty Total']:
+        # Ensure all columns exist
+        required_cols = ['Marketplace', 'Order ID', 'SKU Original', 'Is Bundle?', 'SKU Component', 'Nama Produk', 'Qty Total']
+        for col in required_cols:
             if col not in df_detail.columns:
                 df_detail[col] = ''
         
         # Reorder columns
-        cols_order = ['Marketplace', 'Order ID', 'SKU Original', 'Is Bundle?', 'SKU Component', 'Nama Produk', 'Qty Total']
-        existing_cols = [c for c in cols_order if c in df_detail.columns]
-        other_cols = [c for c in df_detail.columns if c not in cols_order]
+        existing_cols = [c for c in required_cols if c in df_detail.columns]
+        other_cols = [c for c in df_detail.columns if c not in required_cols]
         df_detail = df_detail[existing_cols + other_cols]
         
-        # Group by for summary
+        # Buat summary
         df_summary = df_detail.groupby(['Marketplace', 'SKU Component', 'Nama Produk'], as_index=False).agg({
             'Qty Total': 'sum'
         }).sort_values('Qty Total', ascending=False)
         
         if DEBUG_MODE:
             st.sidebar.success(f"✅ Final: {len(df_detail)} detail rows, {len(df_summary)} summary rows")
-            st.sidebar.text(f"Processing time: {time.time() - start_time:.2f}s")
         
         return {'detail': df_detail, 'summary': df_summary}, None
         
     except Exception as e:
         return None, f"Error saat aggregasi final: {e}"
 
-# --- TEST FUNCTION FOR TOKOPEDIA ---
+# --- SIMPLE TEST FUNCTION ---
 def test_tokopedia_file(file_obj):
-    """Test function untuk debug file Tokopedia"""
+    """Test sederhana untuk file Tokopedia"""
     if not file_obj:
-        st.warning("Upload file Tokopedia dulu")
         return
     
-    st.subheader("🧪 Test Baca File Tokopedia")
-    
-    df_test, err = load_data_smart(file_obj)
-    if err:
-        st.error(f"❌ Error: {err}")
-        return
-    
-    st.success(f"✅ File terbaca! Shape: {df_test.shape}")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.write("**Kolom yang terbaca:**")
-        st.write(list(df_test.columns))
+    with st.expander("🧪 Test Results", expanded=True):
+        df_test, err = load_data_smart(file_obj)
+        if err:
+            st.error(f"Error: {err}")
+            return
         
-        st.write("**5 baris pertama:**")
-        st.dataframe(df_test.head())
-    
-    with col2:
-        st.write("**Statistik:**")
-        st.write(f"Total baris: {len(df_test)}")
-        st.write(f"Total kolom: {len(df_test.columns)}")
+        st.success(f"File terbaca! Shape: {df_test.shape}")
         
-        # Cari kolom status
-        status_cols = [c for c in df_test.columns if 'status' in str(c).lower()]
-        st.write(f"**Kolom Status ditemukan:** {status_cols}")
+        col1, col2 = st.columns(2)
         
-        if status_cols:
-            for col in status_cols[:3]:  # Max 3 kolom status
-                st.write(f"\n**{col}**:")
-                unique_vals = df_test[col].astype(str).str.strip().unique()[:20]
-                st.write(f"Nilai unik: {list(unique_vals)}")
-                
-                # Count 'Perlu dikirim'
-                perlu_dikirim = df_test[df_test[col].astype(str).str.strip().str.lower() == 'perlu dikirim']
-                st.write(f"Baris 'Perlu dikirim': {len(perlu_dikirim)}")
+        with col1:
+            st.write("**Columns:**")
+            st.write(list(df_test.columns))
+            
+            # Cari kolom status
+            status_cols = [c for c in df_test.columns if 'status' in str(c).lower()]
+            st.write(f"**Status columns:** {status_cols}")
+            
+            if status_cols:
+                for col in status_cols[:2]:
+                    perlu_count = len(df_test[df_test[col].astype(str).str.strip().str.lower() == 'perlu dikirim'])
+                    st.write(f"'{col}': 'Perlu dikirim' = {perlu_count} rows")
+        
+        with col2:
+            st.write("**First 3 rows:**")
+            st.dataframe(df_test.head(3))
 
 # --- UI STREAMLIT ---
 st.sidebar.header("📁 1. Upload Kamus (Wajib)")
 kamus_f = st.sidebar.file_uploader("Kamus Dashboard.xlsx", type=['xlsx'], key="kamus")
 
 st.sidebar.header("📁 2. Upload Order")
-shp_f = st.sidebar.file_uploader("Order Shopee", type=['xlsx', 'csv'], key="shopee")
-tok_f = st.sidebar.file_uploader("Order Tokopedia", type=['xlsx', 'csv'], key="tokopedia")
+shp_f = st.sidebar.file_uploader("Order Shopee", type=['xlsx', 'csv', 'xls'], key="shopee")
+tok_f = st.sidebar.file_uploader("Order Tokopedia", type=['xlsx', 'csv', 'xls'], key="tokopedia")
 
-# Test button untuk debug
+# Test button
 if DEBUG_MODE and tok_f:
     if st.sidebar.button("🧪 Test Tokopedia File"):
         test_tokopedia_file(tok_f)
 
-# --- LOGIC RESET DASHBOARD ---
+# Reset state jika file dihapus
 if not shp_f and not tok_f:
     if 'result' in st.session_state:
         del st.session_state['result']
@@ -605,36 +570,50 @@ if st.sidebar.button("🚀 PROSES DATA", type="primary"):
     elif not shp_f and not tok_f:
         st.error("❌ Upload minimal satu file order!")
     else:
-        with st.spinner("Processing... Mohon tunggu..."):
+        with st.spinner("Processing..."):
             try:
                 # Load Kamus
                 k_excel = pd.ExcelFile(kamus_f, engine='openpyxl')
-                
-                # Cek sheet yang tersedia
                 sheet_names = k_excel.sheet_names
+                
                 if DEBUG_MODE:
                     st.sidebar.info(f"Kamus sheets: {sheet_names}")
                 
                 k_data = {}
-                required_sheets = ['Kurir-Shopee', 'Bundle Master', 'SKU Master']
+                # Load dengan nama sheet yang fleksibel
+                for name in ['Kurir-Shopee', 'Kurir', 'Courier']:
+                    if any(name.lower() in s.lower() for s in sheet_names):
+                        matching = [s for s in sheet_names if name.lower() in s.lower()]
+                        k_data['kurir'] = pd.read_excel(k_excel, sheet_name=matching[0])
+                        break
                 
-                for sheet in required_sheets:
-                    if sheet in sheet_names:
-                        k_data[sheet.replace('-', '_').replace(' ', '_').lower().split('_')[0]] = pd.read_excel(k_excel, sheet_name=sheet)
-                    else:
-                        # Cari sheet dengan nama yang mirip
-                        matching = [s for s in sheet_names if any(word.lower() in s.lower() for word in sheet.split())]
-                        if matching:
-                            k_data[sheet.replace('-', '_').replace(' ', '_').lower().split('_')[0]] = pd.read_excel(k_excel, sheet_name=matching[0])
-                        else:
-                            st.error(f"Sheet '{sheet}' tidak ditemukan di Kamus!")
-                            st.stop()
+                for name in ['Bundle Master', 'Bundle', 'Kit']:
+                    if any(name.lower() in s.lower() for s in sheet_names):
+                        matching = [s for s in sheet_names if name.lower() in s.lower()]
+                        k_data['bundle'] = pd.read_excel(k_excel, sheet_name=matching[0])
+                        break
                 
+                for name in ['SKU Master', 'SKU', 'Product']:
+                    if any(name.lower() in s.lower() for s in sheet_names):
+                        matching = [s for s in sheet_names if name.lower() in s.lower()]
+                        k_data['sku'] = pd.read_excel(k_excel, sheet_name=matching[0])
+                        break
+                
+                # Validasi
+                if 'kurir' not in k_data:
+                    st.error("Sheet Kurir tidak ditemukan di Kamus!")
+                    st.stop()
+                if 'bundle' not in k_data:
+                    st.error("Sheet Bundle tidak ditemukan di Kamus!")
+                    st.stop()
+                if 'sku' not in k_data:
+                    st.error("Sheet SKU tidak ditemukan di Kamus!")
+                    st.stop()
+                
+                # Prepare files
                 files = []
-                if shp_f: 
-                    files.append(('Shopee', shp_f))
-                if tok_f: 
-                    files.append(('Tokopedia', tok_f))
+                if shp_f: files.append(('Shopee', shp_f))
+                if tok_f: files.append(('Tokopedia', tok_f))
                 
                 res, err_msg = process_universal_data(files, k_data)
                 
@@ -646,10 +625,7 @@ if st.sidebar.button("🚀 PROSES DATA", type="primary"):
                     st.session_state.result = res
                     
             except Exception as e:
-                st.error(f"❌ System Error: {str(e)[:500]}")
-                if DEBUG_MODE:
-                    import traceback
-                    st.code(traceback.format_exc())
+                st.error(f"❌ System Error: {str(e)}")
 
 # --- OUTPUT AREA ---
 if 'result' in st.session_state:
@@ -675,11 +651,9 @@ if 'result' in st.session_state:
         # Auto-adjust column widths
         for sheet_name in writer.sheets:
             worksheet = writer.sheets[sheet_name]
-            for i, col in enumerate(res['detail'].columns if sheet_name == 'Picking List' else res['summary'].columns):
-                column_len = max(
-                    res['detail'][col].astype(str).str.len().max() if sheet_name == 'Picking List' else res['summary'][col].astype(str).str.len().max(),
-                    len(str(col))
-                )
+            df_to_use = res['detail'] if sheet_name == 'Picking List' else res['summary']
+            for i, col in enumerate(df_to_use.columns):
+                column_len = max(df_to_use[col].astype(str).str.len().max(), len(str(col)))
                 worksheet.set_column(i, i, min(column_len + 2, 50))
     
     st.download_button(
@@ -692,4 +666,4 @@ if 'result' in st.session_state:
 
 # --- FOOTER ---
 st.sidebar.markdown("---")
-st.sidebar.caption("v2.1 - Enhanced Tokopedia Support")
+st.sidebar.caption("v2.2 - Simple & Stable")
