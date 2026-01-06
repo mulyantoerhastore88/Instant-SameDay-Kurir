@@ -12,8 +12,8 @@ st.set_page_config(page_title="Universal Order Processor", layout="wide")
 st.title("🛒 Universal Marketplace Order Processor (Multi-Channel)")
 st.markdown("""
 **Logic Applied:**
-1. **Shopee Official**: Status='Perlu Dikirim' | **Managed='No'** | Resi=Blank | Kurir=Instant (Lookup Kamus).
-2. **Shopee Inhouse**: Status='Perlu Dikirim' | **(Skip Managed)** | Resi=Blank | Kurir=Instant (Lookup Kamus 'Kurir-Shopee' -> Yes).
+1. **Shopee Official**: Status='Perlu Dikirim' | Managed='No' | Resi=Blank | Kurir=Instant (Lookup Kamus).
+2. **Shopee Inhouse**: Status='Perlu Dikirim' | **Resi=Blank** | **Lookup 'Opsi Pengiriman' ke Kamus (Yes)**.
 3. **Tokopedia**: Status='Perlu Dikirim'.
 """)
 
@@ -23,7 +23,6 @@ DEBUG_MODE = st.sidebar.checkbox("Tampilkan info detil", value=False)
 
 # --- FUNGSI CLEANING SKU ---
 def clean_sku(sku):
-    """Membersihkan SKU, mempertahankan prefix FG-/CS-"""
     if pd.isna(sku): return ""
     sku = str(sku).strip()
     sku = ''.join(char for char in sku if ord(char) >= 32)
@@ -39,24 +38,19 @@ def clean_sku(sku):
 
 # --- FUNGSI SMART LOADER ---
 def load_data_smart(file_obj):
-    """Loader pintar untuk membaca Excel/CSV dengan berbagai format"""
     df = None
     filename = file_obj.name.lower()
     
     try:
-        # A. Coba Excel
         if filename.endswith('.xlsx') or filename.endswith('.xls'):
             try:
                 df = pd.read_excel(file_obj, dtype=str, header=None, engine='openpyxl')
-            except:
-                df = None
+            except: df = None
 
-        # B. Coba CSV
         if df is None or df.shape[1] <= 1:
             file_obj.seek(0)
             encodings = ['utf-8-sig', 'utf-8', 'latin-1']
             separators = [',', ';', '\t']
-            
             for enc in encodings:
                 if df is not None and df.shape[1] > 1: break
                 for sep in separators:
@@ -80,7 +74,7 @@ def load_data_smart(file_obj):
 
     # Cari Header
     header_idx = -1
-    keywords = ['status pesanan', 'no. pesanan', 'sku', 'product name', 'nama produk', 'no. resi']
+    keywords = ['status pesanan', 'no. pesanan', 'sku', 'product name', 'nama produk', 'no. resi', 'opsi pengiriman']
     
     for i in range(min(30, df.shape[0])):
         row_str = " ".join([str(v).lower() for v in df.iloc[i].dropna().values])
@@ -94,6 +88,7 @@ def load_data_smart(file_obj):
         df_final = df.iloc[header_idx:].copy()
         df_final.columns = df_final.iloc[0]
         df_final = df_final.iloc[1:].reset_index(drop=True)
+        # Bersihkan nama kolom
         df_final.columns = [str(c).replace('\n', ' ').strip().lower() for c in df_final.columns]
         df_final = df_final.dropna(how='all')
         return df_final, None
@@ -106,13 +101,37 @@ def load_data_smart(file_obj):
 def process_universal_data(uploaded_files, kamus_data):
     all_rows = []
     
-    # 1. LOAD KAMUS
+    # 1. SIAPKAN LOOKUP DATA (KAMUS)
     try:
         df_kurir = kamus_data['kurir']
         df_bundle = kamus_data['bundle']
         df_sku = kamus_data['sku']
 
-        # Mapping Bundle
+        # --- A. LOGIC KURIR (LOOKUP TABLE) ---
+        # Kita buat Dictionary biar pencocokan cepat
+        # Format: { "nama kurir di opsi pengiriman (lowercase)" : True/False }
+        
+        valid_courier_map = {}
+        
+        # Deteksi kolom di Kamus Kurir
+        col_name_kamus = df_kurir.columns[0] # Kolom A: Opsi Pengiriman
+        col_val_kamus = df_kurir.columns[1]  # Kolom B: Instant (Yes/No)
+        
+        if DEBUG_MODE:
+            st.sidebar.markdown("---")
+            st.sidebar.markdown(f"**Mapping Kamus Kurir:**")
+            st.sidebar.text(f"Kolom Nama: {col_name_kamus}")
+            st.sidebar.text(f"Kolom Status: {col_val_kamus}")
+
+        for _, row in df_kurir.iterrows():
+            k_name = str(row[col_name_kamus]).strip().lower()
+            k_stat = str(row[col_val_kamus]).strip().lower()
+            
+            # Jika Yes/Ya/True/1 maka True
+            is_instant = k_stat in ['yes', 'ya', 'true', '1']
+            valid_courier_map[k_name] = is_instant
+
+        # --- B. LOGIC BUNDLE ---
         bundle_map = {}
         b_cols = {str(c).lower(): c for c in df_bundle.columns}
         kit_c = next((b_cols[k] for k in ['kit_sku', 'sku bundle'] if k in b_cols), None)
@@ -129,47 +148,17 @@ def process_universal_data(uploaded_files, kamus_data):
                     if k not in bundle_map: bundle_map[k] = []
                     bundle_map[k].append((c, q))
 
-        # Mapping SKU Name
+        # --- C. SKU NAME ---
         sku_name_map = {}
         for _, row in df_sku.iterrows():
             vals = [v for v in row if pd.notna(v) and str(v).strip()]
             if len(vals) >= 2:
                 sku_name_map[clean_sku(vals[0])] = str(vals[1]).strip()
 
-        # --- LOGIC BARU: GENERATE INSTANT LIST DARI SHEET KURIR-SHOPEE ---
-        instant_list = []
-        if not df_kurir.empty:
-            # Cari kolom yang mengandung kata 'instant' atau 'same day'
-            # Asumsi: Kolom A = Nama Kurir, Kolom B = Status Yes/No (Sesuai request user)
-            
-            # Coba deteksi kolom secara otomatis dulu
-            col_kurir_name = None
-            col_is_instant = None
-            
-            for col in df_kurir.columns:
-                c_low = str(col).lower()
-                if 'opsi' in c_low or 'kurir' in c_low or 'shipping' in c_low:
-                    col_kurir_name = col
-                if 'instant' in c_low or 'same' in c_low:
-                    col_is_instant = col
-            
-            # Fallback jika nama kolom tidak terdeteksi, pakai Index (A=0, B=1)
-            if not col_kurir_name: col_kurir_name = df_kurir.columns[0]
-            if not col_is_instant and len(df_kurir.columns) > 1: col_is_instant = df_kurir.columns[1]
-            
-            if col_kurir_name and col_is_instant:
-                # Ambil baris dimana kolom B isinya Yes/Ya/True
-                instant_list = df_kurir[
-                    df_kurir[col_is_instant].astype(str).str.strip().str.lower().isin(['yes', 'ya', 'true', '1'])
-                ][col_kurir_name].astype(str).str.strip().tolist()
-                
-            if DEBUG_MODE:
-                st.sidebar.info(f"📋 Whitelist Kurir ({len(instant_list)}): {instant_list}")
-
     except Exception as e:
         return None, f"Error Kamus: {e}"
 
-    # 2. LOOP FILES
+    # 2. LOOP SETIAP FILE UPLOAD
     for mp_type, file_obj in uploaded_files:
         df_raw, err = load_data_smart(file_obj)
         if err:
@@ -179,7 +168,7 @@ def process_universal_data(uploaded_files, kamus_data):
         df_filtered = pd.DataFrame()
         
         # ----------------------------------
-        # A. SHOPEE OFFICIAL
+        # A. SHOPEE OFFICIAL (Logic Lama)
         # ----------------------------------
         if mp_type == 'Shopee Official':
             status_c = next((c for c in df_raw.columns if 'status' in c), None)
@@ -192,10 +181,17 @@ def process_universal_data(uploaded_files, kamus_data):
                 continue
 
             try:
+                # Disini dia pakai logic list manual (opsional, tapi saya samakan dgn lookup biar konsisten)
+                # Tapi karena Shopee Official biasa strict kolom 'Dikelola', kita pertahankan logic asli user dulu
+                # kecuali bagian kurir saya arahkan ke map juga biar akurat.
+                
                 c1 = df_raw[status_c].astype(str).str.strip() == 'Perlu Dikirim'
                 c2 = df_raw[managed_c].astype(str).str.strip().str.lower() == 'no'
                 c3 = df_raw[resi_c].fillna('').astype(str).str.strip().isin(['', 'nan', 'none'])
-                c4 = df_raw[kurir_c].astype(str).str.strip().isin(instant_list)
+                
+                # Logic Kurir: Cek apakah nama kurir ada di valid_courier_map dan nilainya True
+                c4 = df_raw[kurir_c].astype(str).str.strip().str.lower().map(valid_courier_map).fillna(False)
+                
                 df_filtered = df_raw[c1 & c2 & c3 & c4].copy()
             except: continue
 
@@ -205,15 +201,18 @@ def process_universal_data(uploaded_files, kamus_data):
             col_prod = next((c for c in df_raw.columns if 'nama produk' in c), 'nama produk')
 
         # ----------------------------------
-        # B. SHOPEE INHOUSE (UPDATED LOGIC)
+        # B. SHOPEE INHOUSE (Logic Request Baru)
         # ----------------------------------
         elif mp_type == 'Shopee Inhouse':
+            # Cari kolom spesifik
             status_c = next((c for c in df_raw.columns if 'status' in c), None)
             resi_c = next((c for c in df_raw.columns if 'resi' in c), None)
-            kurir_c = next((c for c in df_raw.columns if any(x in c for x in ['opsi', 'kirim', 'kurir'])), None)
+            opsi_kirim_c = next((c for c in df_raw.columns if 'opsi pengiriman' in c), None) 
             
-            if not all([status_c, resi_c, kurir_c]):
-                st.error(f"{mp_type}: Kolom (Status/Resi/Opsi Pengiriman) tidak lengkap.")
+            if not all([status_c, resi_c, opsi_kirim_c]):
+                st.error(f"{mp_type}: Kolom (Status / No. Resi / Opsi Pengiriman) tidak lengkap.")
+                if DEBUG_MODE:
+                    st.sidebar.warning(f"Columns Found: {list(df_raw.columns)}")
                 continue
                 
             try:
@@ -223,17 +222,21 @@ def process_universal_data(uploaded_files, kamus_data):
                 # 2. Resi = BLANK
                 c2 = df_raw[resi_c].fillna('').astype(str).str.strip().isin(['', 'nan', 'none', '-'])
                 
-                # 3. Kurir = LOOKUP KAMUS (YES ONLY)
-                # Normalisasi data order agar match dengan kamus
-                kurir_order = df_raw[kurir_c].astype(str).str.strip()
-                c3 = kurir_order.isin(instant_list)
+                # 3. LOOKUP 'Opsi Pengiriman' ke Kamus
+                # Ambil text dari file, lowercase, cocokkan dengan dict valid_courier_map
+                raw_courier_series = df_raw[opsi_kirim_c].astype(str).str.strip().str.lower()
+                c3 = raw_courier_series.map(valid_courier_map).fillna(False)
                 
                 if DEBUG_MODE:
                     st.sidebar.markdown(f"**Debug {mp_type}:**")
                     st.sidebar.text(f"Total Rows: {len(df_raw)}")
-                    st.sidebar.text(f"Lolos Status 'Perlu Dikirim': {c1.sum()}")
+                    st.sidebar.text(f"Lolos Status: {c1.sum()}")
                     st.sidebar.text(f"Lolos Resi Blank: {c2.sum()}")
-                    st.sidebar.text(f"Lolos Kurir (Kamus Yes): {c3.sum()}")
+                    st.sidebar.text(f"Lolos Kurir Lookup: {c3.sum()}")
+                    
+                    # Tampilkan sample kurir yg GAGAL lolos lookup (untuk cek typo di kamus)
+                    failed_couriers = df_raw[~c3][opsi_kirim_c].unique()
+                    st.sidebar.text(f"Sample Rejected Couriers: {failed_couriers[:5]}")
                 
                 df_filtered = df_raw[c1 & c2 & c3].copy()
                 
@@ -263,7 +266,7 @@ def process_universal_data(uploaded_files, kamus_data):
             col_prod = next((c for c in df_raw.columns if 'product' in c), 'product name')
 
         # ----------------------------------
-        # PROCESS ROWS
+        # PROCESS ROWS (Mapping SKU & Qty)
         # ----------------------------------
         if df_filtered.empty:
             if DEBUG_MODE: st.sidebar.warning(f"⚠️ {mp_type}: 0 data lolos filter.")
@@ -280,6 +283,7 @@ def process_universal_data(uploaded_files, kamus_data):
             order_id = str(row.get(col_ord, ''))
             p_name = str(row.get(col_prod, ''))
 
+            # Bundle Check
             if sku_clean in bundle_map:
                 for c_sku, c_qty in bundle_map[sku_clean]:
                     all_rows.append({
@@ -303,7 +307,7 @@ def process_universal_data(uploaded_files, kamus_data):
                 })
 
     # 4. FINAL AGGREGATION
-    if not all_rows: return None, "Tidak ada data yang lolos filter dari semua file."
+    if not all_rows: return None, "Tidak ada data yang lolos filter."
 
     df_detail = pd.DataFrame(all_rows)
     df_summary = df_detail.groupby(['Marketplace', 'SKU Component', 'Nama Produk'], as_index=False).agg({
@@ -318,7 +322,7 @@ kamus_f = st.sidebar.file_uploader("Kamus Dashboard.xlsx", type=['xlsx'], key="k
 
 st.sidebar.header("📁 2. Upload Order Files")
 shp_off_f = st.sidebar.file_uploader("Shopee OFFICIAL (Ada kolom 'Dikelola')", key="shp_off")
-shp_inh_f = st.sidebar.file_uploader("Shopee INHOUSE (ErHair)", key="shp_inh")
+shp_inh_f = st.sidebar.file_uploader("Shopee INHOUSE (ErHair - Lookup Opsi Pengiriman)", key="shp_inh")
 tok_f = st.sidebar.file_uploader("Tokopedia", key="tok")
 
 # Reset
@@ -336,13 +340,14 @@ if st.sidebar.button("🚀 PROSES DATA", type="primary"):
                 k_excel = pd.ExcelFile(kamus_f, engine='openpyxl')
                 k_data = {}
                 
-                # LOAD SHEET KURIR PRIORITAS 'Kurir-Shopee'
+                # --- LOAD SHEET PRIORITAS ---
+                # Mencari sheet yang mengandung kata "Kurir-Shopee" atau "Kurir"
                 sheet_kurir = None
                 for s in k_excel.sheet_names:
                     if 'kurir-shopee' in s.lower():
                         sheet_kurir = s
                         break
-                if not sheet_kurir: # Fallback cari yg ada kata 'Kurir'
+                if not sheet_kurir: 
                     for s in k_excel.sheet_names:
                         if 'kurir' in s.lower():
                             sheet_kurir = s
@@ -351,9 +356,9 @@ if st.sidebar.button("🚀 PROSES DATA", type="primary"):
                 if sheet_kurir:
                     k_data['kurir'] = pd.read_excel(k_excel, sheet_name=sheet_kurir)
                 else:
-                    raise Exception("Sheet Kurir/Kurir-Shopee tidak ditemukan")
+                    raise Exception("Sheet 'Kurir-Shopee' tidak ditemukan di Kamus")
 
-                # Load other sheets
+                # Load sheet Bundle & SKU
                 for req in ['Bundle', 'SKU']:
                     found = False
                     for s in k_excel.sheet_names:
