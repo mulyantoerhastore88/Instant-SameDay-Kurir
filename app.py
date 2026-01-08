@@ -66,7 +66,6 @@ def load_data_smart(file_obj):
 
     if df is None or df.empty: return None, "File kosong atau format tidak dikenali."
 
-    # Auto-Detect Header
     header_idx = 0
     keywords = ['status', 'sku', 'order', 'pesanan', 'quantity', 'jumlah', 'product', 'opsi pengiriman']
     for i in range(min(20, df.shape[0])):
@@ -185,7 +184,8 @@ def process_universal_data(uploaded_files, kamus_data):
             managed_c = next((c for c in df_raw.columns if 'dikelola' in c), None)
 
             if all([status_c, resi_c, kurir_c]):
-                c1 = df_raw[status_c].astype(str).str.strip() == 'Perlu Dikirim'
+                # Fix: Case Insensitive 'perlu dikirim'
+                c1 = df_raw[status_c].astype(str).str.strip().str.lower() == 'perlu dikirim'
                 c2 = df_raw[resi_c].fillna('').astype(str).str.strip().isin(['','nan','none'])
                 c4 = df_raw[kurir_c].astype(str).str.strip().isin(instant_list)
                 
@@ -209,7 +209,8 @@ def process_universal_data(uploaded_files, kamus_data):
             kurir_c = next((c for c in df_raw.columns if any(x in c for x in ['opsi','kirim'])), None)
             
             if all([status_c, resi_c, kurir_c]):
-                c1 = df_raw[status_c].astype(str).str.strip() == 'Perlu Dikirim'
+                # Fix: Case Insensitive 'perlu dikirim'
+                c1 = df_raw[status_c].astype(str).str.strip().str.lower() == 'perlu dikirim'
                 c2 = df_raw[resi_c].fillna('').astype(str).str.strip().isin(['','nan','none'])
                 c3 = df_raw[kurir_c].astype(str).str.strip().isin(instant_list)
                 
@@ -230,25 +231,21 @@ def process_universal_data(uploaded_files, kamus_data):
             else:
                 st.error("Tokopedia: Kolom Status tidak ditemukan")
 
-        # --- C. MAPPING SKU (FIXED) ---
+        # --- C. MAPPING SKU ---
         if df_filtered.empty:
             continue
 
         if DEBUG_MODE: st.sidebar.success(f"  > {len(df_filtered)} data lolos filter.")
 
-        # LOGIC PENTING: Target Column SKU
         col_sku = 'SKU' # default
         if 'shopee' in mp_type.lower():
             # Cari spesifik 'nomor referensi sku' dulu
             col_sku = next((c for c in df_raw.columns if 'nomor referensi sku' in c), None)
             if not col_sku:
-                # Fallback ke 'referensi sku'
                 col_sku = next((c for c in df_raw.columns if 'referensi sku' in c), None)
             if not col_sku:
-                # Last resort baru cari 'sku' (hati-hati kena SKU Induk)
                 col_sku = next((c for c in df_raw.columns if 'sku' in c), 'SKU')
         else:
-            # Tokopedia (cari 'seller sku' atau 'nomor sku')
             col_sku = next((c for c in df_raw.columns if any(x in c for x in ['seller sku', 'nomor sku'])), None)
             if not col_sku:
                  col_sku = next((c for c in df_raw.columns if 'sku' in c), 'SKU')
@@ -337,12 +334,13 @@ if st.sidebar.button("🚀 PROSES DATA", type="primary"):
                         
                         if err: st.warning(err)
                         
-                        t1, t2, t3 = st.tabs(["📋 Picking List", "📦 Stock Summary", "🔍 Validasi Kurir"])
+                        # --- UPDATED TAB NAMES ---
+                        t1, t2, t3 = st.tabs(["📋 Order Detail", "📦 Picking List-PRINT", "🔍 Validasi Kurir"])
                         
                         with t1:
                             if not res['detail'].empty:
                                 st.dataframe(res['detail'], use_container_width=True)
-                            else: st.info("Tidak ada data picking list.")
+                            else: st.info("Tidak ada data.")
                         
                         with t2:
                             if not res['summary'].empty:
@@ -363,10 +361,13 @@ if st.sidebar.button("🚀 PROSES DATA", type="primary"):
                         if not res['detail'].empty:
                             buf = io.BytesIO()
                             with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
-                                res['detail'].to_excel(writer, sheet_name='Picking List', index=False)
-                                res['summary'].to_excel(writer, sheet_name='Stock Check', index=False)
+                                # --- UPDATED SHEET NAMES ---
+                                res['detail'].to_excel(writer, sheet_name='Order Detail', index=False)
+                                res['summary'].to_excel(writer, sheet_name='Picking List-PRINT', index=False)
+                                
                                 if not res['raw_stats'].empty:
                                     res['raw_stats'].to_excel(writer, sheet_name='Validasi Kurir', index=False)
+                                
                                 for sheet in writer.sheets.values():
                                     sheet.set_column(0, 5, 20)
 
@@ -382,4 +383,4 @@ if st.sidebar.button("🚀 PROSES DATA", type="primary"):
                     st.error(f"❌ System Error: {e}")
 
 st.sidebar.markdown("---")
-st.sidebar.caption("v3.4 - Fixed Shopee SKU Column Logic")
+st.sidebar.caption("v3.6 - Final Sheet Names Updated")
