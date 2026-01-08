@@ -9,14 +9,13 @@ warnings.filterwarnings('ignore')
 
 # --- CONFIG ---
 st.set_page_config(page_title="Universal Order Processor", layout="wide")
-st.title("🛒 Universal Marketplace Order Processor-Created By Mulyanto")
+st.title("🛒 Universal Marketplace Order Processor")
 st.markdown("""
 **Logic Applied:**
 1. **Shopee (Official)**: Status='Perlu Dikirim' | Resi=Blank | Managed='No' | **Kurir=Instant (Kamus)**.
 2. **Shopee (INHOUSE)**: Status='Perlu Dikirim' | Resi=Blank | **Kurir=Instant (Kamus)** | *(Tanpa Cek Managed)*.
 3. **Tokopedia**: Status='Perlu Dikirim'.
 4. **SKU Logic**: Prefix **FG-** & **CS-** dipertahankan, sisanya ambil suffix.
-5. **SKU Source**: Kolom spesifik **"Nomor Referensi SKU"**.
 """)
 
 # --- DEBUG MODE ---
@@ -149,7 +148,6 @@ def process_universal_data(uploaded_files, kamus_data):
 
         if DEBUG_MODE:
             st.sidebar.markdown(f"**Processing {mp_type}...**")
-            st.sidebar.text(f"Kolom tersedia: {list(df_raw.columns)}")
 
         # --- A. CAPTURE RAW STATS (VALIDATION TAB) ---
         raw_kurir_col = None
@@ -202,12 +200,7 @@ def process_universal_data(uploaded_files, kamus_data):
                     st.sidebar.text(f"  > Managed No: {c3.sum()}")
                     st.sidebar.text(f"  > Kurir Instant: {c4.sum()}")
             else:
-                missing = []
-                if not status_c: missing.append("Status")
-                if not resi_c: missing.append("Resi")
-                if not kurir_c: missing.append("Opsi Kirim")
-                if not managed_c: missing.append("Dikelola")
-                st.error(f"Shopee Official: Kolom tidak lengkap. Tidak ditemukan: {', '.join(missing)}")
+                st.error(f"Shopee Official: Kolom tidak lengkap (Wajib: Status, Resi, Opsi Kirim, Dikelola)")
 
         # 2. SHOPEE INHOUSE
         elif mp_type == 'Shopee (INHOUSE)':
@@ -227,11 +220,7 @@ def process_universal_data(uploaded_files, kamus_data):
                     st.sidebar.text(f"  > Resi Blank: {c2.sum()}")
                     st.sidebar.text(f"  > Kurir Instant: {c3.sum()}")
             else:
-                missing = []
-                if not status_c: missing.append("Status")
-                if not resi_c: missing.append("Resi")
-                if not kurir_c: missing.append("Opsi Kirim")
-                st.error(f"Shopee Inhouse: Kolom tidak lengkap. Tidak ditemukan: {', '.join(missing)}")
+                st.error(f"Shopee Inhouse: Kolom tidak lengkap (Wajib: Status, Resi, Opsi Kirim)")
 
         # 3. TOKOPEDIA
         elif mp_type == 'Tokopedia':
@@ -244,60 +233,25 @@ def process_universal_data(uploaded_files, kamus_data):
             else:
                 st.error("Tokopedia: Kolom Status tidak ditemukan")
 
-        # --- C. MAPPING (DENGAN KOLOM SPESIFIK "NOMOR REFERENSI SKU") ---
+        # --- C. MAPPING ---
         if df_filtered.empty:
             if DEBUG_MODE: st.sidebar.warning(f"  > 0 data lolos filter.")
             continue
 
         if DEBUG_MODE: st.sidebar.success(f"  > {len(df_filtered)} data diproses.")
 
-        # MODIFIKASI DI SINI: Gunakan kolom spesifik "Nomor Referensi SKU"
-        # Cari dengan case-insensitive dan berbagai variasi
-        col_sku = None
-        for col_name in df_raw.columns:
-            if 'nomor referensi sku' in col_name.lower():
-                col_sku = col_name
-                break
-        
-        # Jika tidak ditemukan, coba variasi lain
-        if not col_sku:
-            for col_name in df_raw.columns:
-                if all(word in col_name.lower() for word in ['nomor', 'referensi', 'sku']):
-                    col_sku = col_name
-                    break
-        
-        # Jika masih tidak ditemukan, fallback ke logika lama (hanya untuk debug)
-        if not col_sku:
-            if DEBUG_MODE:
-                st.sidebar.warning(f"  > Kolom 'Nomor Referensi SKU' tidak ditemukan, fallback ke logika lama")
-            col_sku = next((c for c in df_raw.columns if 'sku' in c), 'SKU')
-        else:
-            if DEBUG_MODE:
-                st.sidebar.text(f"  > Menggunakan kolom SKU: '{col_sku}'")
-
+        col_sku = next((c for c in df_raw.columns if 'sku' in c), 'SKU')
         col_qty = next((c for c in df_raw.columns if any(x in c for x in ['jumlah','quantity'])), 'Jumlah')
         col_ord = next((c for c in df_raw.columns if any(x in c for x in ['pesanan','order','invoice'])), 'Order ID')
 
-        if DEBUG_MODE and col_sku not in df_filtered.columns:
-            st.sidebar.error(f"  > ERROR: Kolom '{col_sku}' tidak ada dalam data yang difilter!")
-        
         for _, row in df_filtered.iterrows():
-            # Pastikan kolom SKU ada sebelum mengaksesnya
-            if col_sku not in df_filtered.columns:
-                if DEBUG_MODE:
-                    st.sidebar.error(f"  > SKIP: Kolom '{col_sku}' tidak tersedia")
-                continue
-                
             raw_sku = str(row.get(col_sku, ''))
             sku_clean = clean_sku(raw_sku)
             order_id = str(row.get(col_ord, ''))
             try: qty = float(str(row.get(col_qty, 0)).replace(',', '.'))
             except: qty = 0
             
-            if not sku_clean or qty <= 0: 
-                if DEBUG_MODE and raw_sku:
-                    st.sidebar.text(f"  > SKIP SKU: '{raw_sku}' -> cleaned: '{sku_clean}'")
-                continue
+            if not sku_clean or qty <= 0: continue
             
             if sku_clean in bundle_map:
                 for comp_sku, comp_qty in bundle_map[sku_clean]:
@@ -415,4 +369,4 @@ if st.sidebar.button("🚀 PROSES DATA", type="primary"):
                     st.error(f"❌ System Error: {e}")
 
 st.sidebar.markdown("---")
-st.sidebar.caption("v3.3 - SKU dari kolom 'Nomor Referensi SKU'")
+st.sidebar.caption("v3.2 - Validation Tab Added")
